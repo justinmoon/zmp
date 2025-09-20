@@ -16,31 +16,9 @@
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
     in {
-      packages = forAllSystems (system:
+      perSystem = f: forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
-        in {
-          zmp = pkgs.stdenvNoCC.mkDerivation {
-            pname = "zmp";
-            version = "0.0.1";
-            src = ./.;
-            nativeBuildInputs = [ pkgs.zig ];
-            buildPhase = ''
-              zig build -Doptimize=ReleaseSafe
-            '';
-            installPhase = ''
-              mkdir -p $out/bin
-              cp zig-out/bin/zmp $out/bin/
-            '';
-          };
-          default = self.packages.${system}.zmp;
-        }
-      );
-
-      devShells = forAllSystems (system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-          # Choose an emulator system image appropriate for host arch
           sysimg = sdkPkgs:
             if pkgs.stdenv.hostPlatform.isAarch64 then
               sdkPkgs.system-images-android-34-google-apis-arm64-v8a
@@ -54,32 +32,101 @@
             emulator
             (sysimg sdkPkgs)
           ]);
-        in {
-          default = pkgs.mkShell {
-            packages = [
-              pkgs.zig
-              pkgs.jdk17
-              pkgs.gradle
-              pkgs.bun
-              androidSdk
-            ];
-            ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
-            ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
-            shellHook = ''
-              # Add Android tools to PATH (adb, avdmanager, emulator)
+          androidHome = "${androidSdk}/libexec/android-sdk";
+          baseRuntimeInputs = [
+            pkgs.bashInteractive
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.gnused
+            pkgs.gnugrep
+            pkgs.util-linux
+            pkgs.which
+            pkgs.zig
+            pkgs.jdk17
+            pkgs.gradle
+            pkgs.bun
+            pkgs.zip
+            pkgs.unzip
+            androidSdk
+          ];
+          mkCiScript = pkgs.writeShellApplication {
+            name = "zmp-ci";
+            runtimeInputs = baseRuntimeInputs;
+            text = ''
+              set -euo pipefail
+              export ANDROID_HOME=${androidHome}
+              export ANDROID_SDK_ROOT=${androidHome}
               export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/emulator:$PATH"
-              # Best-effort ANDROID_NDK_ROOT export if an NDK is present
-              if [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
-                export ANDROID_NDK_ROOT="$(echo "$ANDROID_SDK_ROOT"/ndk/* | awk '{print $1}')"
-              fi
-              echo "ZMP dev shell ready."
-              (adb version >/dev/null 2>&1 && echo "- adb: $(adb version 2>/dev/null | head -n1)") || echo "- adb: missing"
-              (avdmanager --help >/dev/null 2>&1 && echo "- avdmanager: ok") || echo "- avdmanager: missing"
-              (emulator -version >/dev/null 2>&1 && echo "- emulator: ok") || echo "- emulator: missing"
-              echo "- Java: $(java -version 2>&1 | head -n1)"
+              export IN_NIX_SHELL=1
+              scripts/test-e2e.sh "$@"
             '';
           };
+          ciTools = pkgs.symlinkJoin {
+            name = "zmp-ci-tools";
+            paths = [ pkgs.unzip pkgs.zip pkgs.android-tools ];
+          };
+        in f { inherit pkgs androidSdk androidHome mkCiScript ciTools; }
+      );
+
+      packages = perSystem ({ pkgs, mkCiScript, ciTools, ... }:
+        let
+          zmpPackage = pkgs.stdenvNoCC.mkDerivation {
+            pname = "zmp";
+            version = "0.0.1";
+            src = ./.;
+            nativeBuildInputs = [ pkgs.zig ];
+            buildPhase = ''
+              zig build -Doptimize=ReleaseSafe
+            '';
+            installPhase = ''
+              mkdir -p $out/bin
+              cp zig-out/bin/zmp $out/bin/
+            '';
+          };
+        in {
+          zmp = zmpPackage;
+          "ci-tools" = ciTools;
+          default = zmpPackage;
         }
       );
+
+      apps = perSystem ({ mkCiScript, ... }:
+        let
+          ciApp = {
+            type = "app";
+            program = "${mkCiScript}/bin/zmp-ci";
+          };
+        in {
+          ci = ciApp;
+          default = ciApp;
+        }
+      );
+
+      devShells = perSystem ({ pkgs, androidSdk, androidHome, ... }: {
+        default = pkgs.mkShell {
+          packages = [
+            pkgs.zig
+            pkgs.jdk17
+            pkgs.gradle
+            pkgs.bun
+            pkgs.zip
+            pkgs.unzip
+            androidSdk
+          ];
+          ANDROID_HOME = androidHome;
+          ANDROID_SDK_ROOT = androidHome;
+          shellHook = ''
+            export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/emulator:$PATH"
+            if [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
+              export ANDROID_NDK_ROOT="$(echo "$ANDROID_SDK_ROOT"/ndk/* | awk '{print $1}')"
+            fi
+            echo "ZMP dev shell ready."
+            (adb version >/dev/null 2>&1 && echo "- adb: $(adb version 2>/dev/null | head -n1)") || echo "- adb: missing"
+            (avdmanager --help >/dev/null 2>&1 && echo "- avdmanager: ok") || echo "- avdmanager: missing"
+            (emulator -version >/dev/null 2>&1 && echo "- emulator: ok") || echo "- emulator: missing"
+            echo "- Java: $(java -version 2>&1 | head -n1)"
+          '';
+        };
+      });
     };
 }

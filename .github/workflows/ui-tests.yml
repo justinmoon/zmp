@@ -25,25 +25,28 @@ jobs:
       - name: Verify nix installation
         run: nix --version
 
-      - name: Provide unzip/adb in PATH
+      - name: Provide ci toolchain in PATH
         run: |
           set -eu
           TOOL_DIR="$RUNNER_TEMP/zmp-tools"
           mkdir -p "$TOOL_DIR"
-          ADB_BIN="$(nix shell --accept-flake-config nixpkgs#android-tools -c command -v adb)"
-          UNZIP_BIN="$(nix shell --accept-flake-config nixpkgs#unzip -c command -v unzip)"
-          ln -sf "$UNZIP_BIN" "$TOOL_DIR/unzip"
+          CI_TOOLS=$(nix build .#ci-tools --no-link --print-out-paths)
+          cp "$CI_TOOLS"/bin/unzip "$TOOL_DIR/"
+          if [ -f "$CI_TOOLS/bin/zip" ]; then
+            cp "$CI_TOOLS"/bin/zip "$TOOL_DIR/"
+          fi
+          cp "$CI_TOOLS"/bin/adb "$TOOL_DIR/adb-real"
           cat <<'EOS' > "$TOOL_DIR/adb"
 #!/usr/bin/env bash
-ADB_BIN="__ADB_BIN__"
-if [[ "$1" == "-s" && "$3" == "emu" && "$4" == "kill" ]]; then
-  "$ADB_BIN" "$@" >/dev/null 2>&1 || true
+set -euo pipefail
+real="$(dirname "$0")/adb-real"
+if [[ "${1:-}" == "-s" && "${3:-}" == "emu" && "${4:-}" == "kill" ]]; then
+  "$real" "$@" >/dev/null 2>&1 || true
   exit 0
 fi
-exec "$ADB_BIN" "$@"
+exec "$real" "$@"
 EOS
-          sed -i "s#__ADB_BIN__#$ADB_BIN#g" "$TOOL_DIR/adb"
-          chmod +x "$TOOL_DIR"/adb
+          chmod +x "$TOOL_DIR"/adb-real "$TOOL_DIR"/adb
           echo "$TOOL_DIR" >> "$GITHUB_PATH"
 
       - name: Run UI smoke test (${{ matrix.mode }})
@@ -55,4 +58,4 @@ EOS
           emulator-options: "-no-window -no-audio -gpu swiftshader_indirect -no-snapshot"
           emulator-boot-timeout: 600000
           script: |
-            nix develop --command bash -lc "scripts/test-e2e.sh --mode ${{ matrix.mode }}"
+            nix run .#ci -- --mode ${{ matrix.mode }}

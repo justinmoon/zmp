@@ -42,6 +42,16 @@ Notes
 - Cleartext to 127.0.0.1 is allowed by `network_security_config.xml`.
 - Native mode currently exposes a stub `startServer` for future work; it simply does nothing in the FFI sample.
 
+UI automation (Appium + WebdriverIO)
+
+- `ui-tests/` contains headless UI checks using Bun + WebdriverIO + Appium.
+- Typical flow:
+  1. Start an emulator (headless) and wait for boot.
+  2. Build/install the app (e.g. `scripts/e2e.sh` or `../zig-out/bin/zmp dev ... --native`).
+  3. `cd ui-tests && bun install` (first time).
+  4. `ZMP_APP_PACKAGE=com.example.demo bun wdio`.
+- The default spec asserts the app shows `Zig says: 42` sourced from the Zig JNI call. See `ui-tests/README.md` for more options.
+
 Nix flake
 
 - `flake.nix` provides:

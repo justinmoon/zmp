@@ -1,0 +1,7 @@
+zig-out/
+.zig-cache/
+ui-tests/node_modules/
+ui-tests/.appium/
+demo/android/.gradle/
+demo/android/app/build/
+demo/android/app/src/main/jniLibs/

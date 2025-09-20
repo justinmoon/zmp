@@ -25,6 +25,11 @@ jobs:
       - name: Verify nix installation
         run: nix --version
 
+      - name: Add required tools to PATH
+        run: |
+          echo "$(nix path-info nixpkgs#unzip)/bin" >> $GITHUB_PATH
+          echo "$(nix path-info nixpkgs#android-tools)/bin" >> $GITHUB_PATH
+
       - name: Run UI smoke test (${{ matrix.mode }})
         uses: reactivecircus/android-emulator-runner@v2
         with:

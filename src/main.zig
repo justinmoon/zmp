@@ -177,16 +177,20 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
     }
 
     // Build JNI libs when requested via --native
-    if (use_native and fileExists(proj, "native/server.zig")) {
+    if (use_native) {
+        if (!fileExists(proj, "native/server.zig")) {
+            std.log.warn("--native: missing native/server.zig; scaffolding default server", .{});
+            try writeNativeServer(allocator, proj, app_id);
+        }
         std.log.info("--native: building JNI libs", .{});
         // Ensure jniLibs dirs exist
         try runInDir(project_path, &.{ "bash", "-lc", "mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64" });
         // Build for arm64 (devices + Apple Silicon Emulator)
         try runInDir(project_path, &.{ "bash", "-lc",
-            "zig build-lib native/server.zig -dynamic -fPIC -OReleaseSafe -target aarch64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/arm64-v8a/libzmpserver.so" });
+            "zig build-lib native/ffi.zig -dynamic -fPIC -OReleaseSafe -target aarch64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/arm64-v8a/libzmpserver.so -Inative" });
         // Build for x86_64 (Intel emulator)
         _ = runInDir(project_path, &.{ "bash", "-lc",
-            "zig build-lib native/server.zig -dynamic -fPIC -OReleaseSafe -target x86_64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/x86_64/libzmpserver.so" }) catch {};
+            "zig build-lib native/ffi.zig -dynamic -fPIC -OReleaseSafe -target x86_64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/x86_64/libzmpserver.so -Inative" }) catch {};
     }
 
     var p1: [16]u8 = undefined;
@@ -591,7 +595,41 @@ fn writeAndroidProject(allocator: std.mem.Allocator, android_dir: std.fs.Dir, na
     var kw = k_buf.writer();
     try kw.writeAll("package ");
     try kw.print("{s}", .{app_id});
-    try kw.writeAll("\n\nimport android.os.Bundle\nimport android.webkit.WebView\nimport android.webkit.WebViewClient\nimport androidx.appcompat.app.AppCompatActivity\n\nclass MainActivity : AppCompatActivity() {\n  override fun onCreate(savedInstanceState: Bundle?) {\n    super.onCreate(savedInstanceState)\n    if (BuildConfig.DEV_NATIVE) {\n      Native.startServer(BuildConfig.DEV_SERVER_PORT)\n    }\n    val webView = WebView(this)\n    if (BuildConfig.DEBUG) {\n      WebView.setWebContentsDebuggingEnabled(true)\n    }\n    val s = webView.settings\n    s.javaScriptEnabled = true\n    s.domStorageEnabled = true\n    webView.webViewClient = WebViewClient()\n    setContentView(webView)\n    webView.loadUrl(\"http://127.0.0.1:${BuildConfig.DEV_SERVER_PORT}/\")\n  }\n}\n");
+    try kw.writeAll(
+        "\n\nimport android.os.Bundle\n"
+        ++ "import android.view.Gravity\n"
+        ++ "import android.webkit.WebView\n"
+        ++ "import android.webkit.WebViewClient\n"
+        ++ "import android.widget.TextView\n"
+        ++ "import androidx.appcompat.app.AppCompatActivity\n\n"
+        ++ "class MainActivity : AppCompatActivity() {\n"
+        ++ "  override fun onCreate(savedInstanceState: Bundle?) {\n"
+        ++ "    super.onCreate(savedInstanceState)\n"
+        ++ "    val number = Native.getNumber()\n"
+        ++ "    val textView = TextView(this).apply {\n"
+        ++ "      text = \"Zig says: \" + number\n"
+        ++ "      textSize = 24f\n"
+        ++ "      gravity = Gravity.CENTER\n"
+        ++ "      setPadding(32, 32, 32, 32)\n"
+        ++ "    }\n"
+        ++ "    setContentView(textView)\n"
+        ++ "    // launchWebView(BuildConfig.DEV_SERVER_PORT)\n"
+        ++ "  }\n\n"
+        ++ "  @Suppress(\"unused\")\n"
+        ++ "  private fun launchWebView(port: Int) {\n"
+        ++ "    if (BuildConfig.DEBUG) {\n"
+        ++ "      WebView.setWebContentsDebuggingEnabled(true)\n"
+        ++ "    }\n"
+        ++ "    val webView = WebView(this)\n"
+        ++ "    val settings = webView.settings\n"
+        ++ "    settings.javaScriptEnabled = true\n"
+        ++ "    settings.domStorageEnabled = true\n"
+        ++ "    webView.webViewClient = WebViewClient()\n"
+        ++ "    setContentView(webView)\n"
+        ++ "    webView.loadUrl(\"http://127.0.0.1:\" + port + \"/\")\n"
+        ++ "  }\n"
+        ++ "}\n"
+    );
     const main_kt = try k_buf.toOwnedSlice();
     defer allocator.free(main_kt);
     try writeFile(pkg_dir, "MainActivity.kt", main_kt);
@@ -602,7 +640,13 @@ fn writeAndroidProject(allocator: std.mem.Allocator, android_dir: std.fs.Dir, na
     var nw = n_buf.writer();
     try nw.writeAll("package ");
     try nw.print("{s}", .{app_id});
-    try nw.writeAll("\n\nobject Native {\n  init { System.loadLibrary(\"zmpserver\") }\n  @JvmStatic external fun startServer(port: Int)\n}\n");
+    try nw.writeAll(
+        "\n\nobject Native {\n"
+        ++ "  init { System.loadLibrary(\"zmpserver\") }\n"
+        ++ "  @JvmStatic external fun getNumber(): Int\n"
+        ++ "  @JvmStatic external fun startServer(port: Int)\n"
+        ++ "}\n"
+    );
     const native_kt = try n_buf.toOwnedSlice();
     defer allocator.free(native_kt);
     try writeFile(pkg_dir, "Native.kt", native_kt);
@@ -644,10 +688,32 @@ fn writeNativeServer(allocator: std.mem.Allocator, proj_dir: std.fs.Dir, app_id:
     const jni_sym = try std.fmt.allocPrint(allocator, "Java_{s}_Native_startServer", .{underscored.items});
     defer allocator.free(jni_sym);
 
+    try writeNativeHelpers(allocator, native_dir);
+    try writeNativeFfi(allocator, native_dir, underscored.items);
+
     var sbuf = std.array_list.Managed(u8).init(allocator);
     defer sbuf.deinit();
     var w = sbuf.writer();
     try w.writeAll("const std = @import(\"std\");\n\n");
+    try w.writeAll("const Auxv = struct {\n" ++
+        "    const Entry = extern struct { tag: usize, value: usize };\n" ++
+        "    fn read(tag: usize) usize {\n" ++
+        "        var file = std.fs.openFileAbsolute(\"/proc/self/auxv\", .{}) catch return 0;\n" ++
+        "        defer file.close();\n" ++
+        "        var read_buf: [1024]u8 = undefined;\n" ++
+        "        var reader = file.reader(&read_buf);\n" ++
+        "        var entry: Entry = .{ .tag = 0, .value = 0 };\n" ++
+        "        while (true) {\n" ++
+        "            const bytes_read = reader.read(std.mem.asBytes(&entry)) catch return 0;\n" ++
+        "            if (bytes_read != @sizeOf(Entry)) return 0;\n" ++
+        "            if (entry.tag == tag) return entry.value;\n" ++
+        "            if (entry.tag == 0 and entry.value == 0) return 0;\n" ++
+        "        }\n" ++
+        "    }\n" ++
+        "};\n\n");
+    try w.writeAll("pub export fn getauxval(tag: usize) callconv(.c) usize {\n" ++
+        "    return Auxv.read(tag);\n" ++
+        "}\n\n");
     try w.writeAll("var started = std.atomic.Value(u8).init(0);\n");
     try w.writeAll("var counter = std.atomic.Value(u64).init(0);\n\n");
     try w.writeAll("fn serverMain(port: u16) !void {\n");
@@ -704,4 +770,53 @@ fn writeNativeServer(allocator: std.mem.Allocator, proj_dir: std.fs.Dir, app_id:
     const server_zig = try sbuf.toOwnedSlice();
     defer allocator.free(server_zig);
     try writeFile(native_dir, "server.zig", server_zig);
+}
+
+fn writeNativeHelpers(allocator: std.mem.Allocator, native_dir: std.fs.Dir) !void {
+    _ = allocator;
+    const header = "// reserved for future JNI helpers\n";
+    try writeFile(native_dir, "zmp_jni_helper.h", header);
+}
+
+fn writeNativeFfi(allocator: std.mem.Allocator, native_dir: std.fs.Dir, underscored: []const u8) !void {
+    const number_sym = try std.fmt.allocPrint(allocator, "Java_{s}_Native_getNumber", .{underscored});
+    defer allocator.free(number_sym);
+    const stub_sym = try std.fmt.allocPrint(allocator, "Java_{s}_Native_startServer", .{underscored});
+    defer allocator.free(stub_sym);
+
+    var buf = std.array_list.Managed(u8).init(allocator);
+    defer buf.deinit();
+    var fw = buf.writer();
+    try fw.writeAll(
+        "const std = @import(\"std\");\n\n"
+        ++ "pub export fn getauxval(tag: usize) callconv(.c) usize {\n"
+        ++ "    _ = tag;\n"
+        ++ "    return 0;\n"
+        ++ "}\n\n"
+    );
+    const fn_header_number = try std.fmt.allocPrint(allocator,
+        "pub export fn {s}(env: ?*anyopaque, clazz: ?*anyopaque) callconv(.c) i32 {{\n",
+        .{number_sym},
+    );
+    defer allocator.free(fn_header_number);
+    try fw.writeAll(fn_header_number);
+    try fw.writeAll(
+        "    _ = env; _ = clazz;\n"
+        ++ "    return 42;\n"
+        ++ "}\n\n"
+    );
+    const fn_header_stub = try std.fmt.allocPrint(allocator,
+        "pub export fn {s}(env: ?*anyopaque, clazz: ?*anyopaque, port: i32) callconv(.c) void {{\n",
+        .{stub_sym},
+    );
+    defer allocator.free(fn_header_stub);
+    try fw.writeAll(fn_header_stub);
+    try fw.writeAll(
+        "    _ = env; _ = clazz; _ = port;\n"
+        ++ "}\n"
+    );
+
+    const ffi_content = try buf.toOwnedSlice();
+    defer allocator.free(ffi_content);
+    try writeFile(native_dir, "ffi.zig", ffi_content);
 }

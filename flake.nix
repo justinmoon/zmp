@@ -60,6 +60,7 @@
               pkgs.zig
               pkgs.jdk17
               pkgs.gradle
+              pkgs.bun
               androidSdk
             ];
             ANDROID_HOME = "${androidSdk}/libexec/android-sdk";

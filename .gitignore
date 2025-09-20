@@ -1,5 +1,6 @@
 zig-out/
 .zig-cache/
+.direnv/
 ui-tests/node_modules/
 ui-tests/.appium/
 demo/android/.gradle/

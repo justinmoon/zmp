@@ -1,19 +1,15 @@
 {
   "name": "zmp-ui-tests",
-  "type": "module",
   "private": true,
+  "type": "module",
   "scripts": {
-    "wdio": "wdio run wdio.conf.ts"
+    "test": "node run.js"
   },
   "dependencies": {
-    "@wdio/appium-service": "^9.0.8",
-    "@wdio/local-runner": "^9.0.8",
-    "@wdio/mocha-framework": "^9.0.8",
-    "@wdio/spec-reporter": "^9.0.8",
     "appium": "^2.5.4",
-    "expect-webdriverio": "^4.4.10",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.4.0",
-    "webdriverio": "^9.0.8"
+    "webdriverio": "^8.36.0"
+  },
+  "devDependencies": {
+    "appium-uiautomator2-driver": "^2.27.0"
   }
 }

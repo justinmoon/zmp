@@ -30,10 +30,10 @@ jobs:
           TOOL_DIR="$RUNNER_TEMP/zmp-tools"
           mkdir -p "$TOOL_DIR"
           nix shell --accept-flake-config nixpkgs#unzip nixpkgs#android-tools -c sh -c '
-            cp $(command -v unzip) "$TOOL_DIR/"
-            cp $(command -v zip) "$TOOL_DIR/" 2>/dev/null || true
-            cp $(command -v adb) "$TOOL_DIR/"
-          '
+            dest="$1"
+            cp "$(command -v unzip)" "$dest/"
+            cp "$(command -v adb)" "$dest/"
+          ' sh "$TOOL_DIR"
           chmod +x "$TOOL_DIR"/*
           echo "$TOOL_DIR" >> "$GITHUB_PATH"
 

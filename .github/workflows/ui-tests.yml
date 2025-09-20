@@ -23,7 +23,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install host-side dependencies
-        run: nix-env -iA nixpkgs.unzip nixpkgs.android-tools
+        env:
+          NIXPKGS_ALLOW_UNFREE: "1"
+        run: nix profile install --impure --accept-flake-config nixpkgs#unzip nixpkgs#android-tools
 
       - name: Verify nix installation
         run: nix --version

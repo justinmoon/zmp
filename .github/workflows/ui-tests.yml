@@ -27,14 +27,23 @@ jobs:
 
       - name: Provide unzip/adb in PATH
         run: |
+          set -eu
           TOOL_DIR="$RUNNER_TEMP/zmp-tools"
           mkdir -p "$TOOL_DIR"
-          nix shell --accept-flake-config nixpkgs#unzip nixpkgs#android-tools -c sh -c '
-            dest="$1"
-            cp "$(command -v unzip)" "$dest/"
-            cp "$(command -v adb)" "$dest/"
-          ' sh "$TOOL_DIR"
-          chmod +x "$TOOL_DIR"/*
+          ADB_BIN="$(nix shell --accept-flake-config nixpkgs#android-tools -c command -v adb)"
+          UNZIP_BIN="$(nix shell --accept-flake-config nixpkgs#unzip -c command -v unzip)"
+          ln -sf "$UNZIP_BIN" "$TOOL_DIR/unzip"
+          cat <<'EOS' > "$TOOL_DIR/adb"
+#!/usr/bin/env bash
+ADB_BIN="__ADB_BIN__"
+if [[ "$1" == "-s" && "$3" == "emu" && "$4" == "kill" ]]; then
+  "$ADB_BIN" "$@" >/dev/null 2>&1 || true
+  exit 0
+fi
+exec "$ADB_BIN" "$@"
+EOS
+          sed -i "s#__ADB_BIN__#$ADB_BIN#g" "$TOOL_DIR/adb"
+          chmod +x "$TOOL_DIR"/adb
           echo "$TOOL_DIR" >> "$GITHUB_PATH"
 
       - name: Run UI smoke test (${{ matrix.mode }})

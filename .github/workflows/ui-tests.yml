@@ -1,10 +1,8 @@
 name: UI Tests
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
-
+  
 jobs:
   android:
     runs-on: [self-hosted, nixos, hetzner, zmp]

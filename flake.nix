@@ -15,7 +15,6 @@
         "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
-    in {
       perSystem = f: forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -67,6 +66,8 @@
           };
         in f { inherit pkgs androidSdk androidHome mkCiScript ciTools; }
       );
+
+    in {
 
       packages = perSystem ({ pkgs, mkCiScript, ciTools, ... }:
         let

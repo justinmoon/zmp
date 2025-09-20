@@ -7,13 +7,19 @@ on:
 
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, nixos, hetzner, zmp]
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         mode: [host, native]
     steps:
+      - name: Enforce temporary PR author restriction
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'justinmoon' }}
+        run: |
+          echo "CI currently runs only for PRs opened by @justinmoon." >&2
+          exit 1
+
       - uses: actions/checkout@v4
 
       - uses: DeterminateSystems/nix-installer-action@v1
@@ -25,6 +31,7 @@ jobs:
           api-level: 34
           arch: x86_64
           profile: pixel_5
-          emulator-options: "-no-window -no-audio -gpu swiftshader_indirect"
+          emulator-options: "-no-window -no-audio -gpu swiftshader_indirect -no-snapshot"
+          emulator-boot-timeout: 600000
           script: |
             nix develop --command bash -lc "scripts/test-e2e.sh --mode ${{ matrix.mode }}"

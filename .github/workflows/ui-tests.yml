@@ -25,10 +25,17 @@ jobs:
       - name: Verify nix installation
         run: nix --version
 
-      - name: Add required tools to PATH
+      - name: Provide unzip/adb in PATH
         run: |
-          echo "$(nix path-info nixpkgs#unzip)/bin" >> $GITHUB_PATH
-          echo "$(nix path-info nixpkgs#android-tools)/bin" >> $GITHUB_PATH
+          TOOL_DIR="$RUNNER_TEMP/zmp-tools"
+          mkdir -p "$TOOL_DIR"
+          nix shell --accept-flake-config nixpkgs#unzip nixpkgs#android-tools -c sh -c '
+            cp $(command -v unzip) "$TOOL_DIR/"
+            cp $(command -v zip) "$TOOL_DIR/" 2>/dev/null || true
+            cp $(command -v adb) "$TOOL_DIR/"
+          '
+          chmod +x "$TOOL_DIR"/*
+          echo "$TOOL_DIR" >> "$GITHUB_PATH"
 
       - name: Run UI smoke test (${{ matrix.mode }})
         uses: reactivecircus/android-emulator-runner@v2

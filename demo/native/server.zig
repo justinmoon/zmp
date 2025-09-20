@@ -1,0 +1,134 @@
+const std = @import("std");
+
+const index_template = @embedFile("static/index.html");
+const count_placeholder = "{{COUNT}}";
+
+const placeholder_index = std.mem.indexOf(u8, index_template, count_placeholder) orelse
+    @compileError("static/index.html must contain {{COUNT}} placeholder");
+const html_prefix = index_template[0..placeholder_index];
+const html_suffix = index_template[placeholder_index + count_placeholder.len ..];
+const max_count_digits = 20;
+const max_body_len = html_prefix.len + html_suffix.len + max_count_digits;
+
+var started = std.atomic.Value(u8).init(0);
+var counter = std.atomic.Value(u64).init(0);
+
+pub fn startServer(port: u16) void {
+    if (port == 0) return;
+    if (started.swap(1, .acq_rel) == 1) return;
+    defer started.store(0, .release);
+
+    serverMain(port) catch |err| {
+        std.log.err("native server crashed: {s}", .{@errorName(err)});
+    };
+}
+
+fn serverMain(port: u16) !void {
+    const address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+    var server = try std.net.Address.listen(address, .{ .reuse_address = true });
+    defer server.deinit();
+
+    while (true) {
+        const conn = server.accept() catch |err| {
+            std.log.err("accept failed: {s}", .{@errorName(err)});
+            continue;
+        };
+        handleConn(conn);
+    }
+}
+
+fn handleConn(conn: std.net.Server.Connection) void {
+    var stream = conn.stream;
+    defer stream.close();
+
+    var buf: [4096]u8 = undefined;
+    const n = stream.read(&buf) catch |err| {
+        std.log.err("read failed: {s}", .{@errorName(err)});
+        return;
+    };
+    if (n == 0) return;
+
+    const request = buf[0..n];
+    const path = parsePath(request);
+
+    const is_root = std.mem.eql(u8, path, "/");
+    const is_increment = std.mem.eql(u8, path, "/inc");
+
+    if (!is_root and !is_increment) {
+        sendStatus(&stream, 404, "Not Found", "text/plain; charset=utf-8", "not found");
+        return;
+    }
+
+    const count: u64 = if (is_increment)
+        counter.fetchAdd(1, .acq_rel) + 1
+    else
+        counter.load(.acquire);
+
+    var body_buf: [max_body_len]u8 = undefined;
+    const body = renderCount(count, &body_buf) catch |err| {
+        std.log.err("render failed: {s}", .{@errorName(err)});
+        return;
+    };
+
+    sendHtml(&stream, body);
+}
+
+fn renderCount(count: u64, buffer: []u8) ![]const u8 {
+    var count_buf: [max_count_digits]u8 = undefined;
+    const count_str = std.fmt.bufPrint(&count_buf, "{d}", .{count}) catch return error.FormatFailed;
+
+    const total = html_prefix.len + html_suffix.len + count_str.len;
+    if (total > buffer.len) return error.BufferTooSmall;
+
+    std.mem.copyForwards(u8, buffer[0..html_prefix.len], html_prefix);
+    var idx: usize = html_prefix.len;
+    std.mem.copyForwards(u8, buffer[idx .. idx + count_str.len], count_str);
+    idx += count_str.len;
+    std.mem.copyForwards(u8, buffer[idx .. idx + html_suffix.len], html_suffix);
+    idx += html_suffix.len;
+
+    return buffer[0..idx];
+}
+
+fn sendHtml(stream: *std.net.Stream, body: []const u8) void {
+    sendStatus(stream, 200, "OK", "text/html; charset=utf-8", body);
+}
+
+fn sendStatus(
+    stream: *std.net.Stream,
+    code: u16,
+    reason: []const u8,
+    content_type: []const u8,
+    body: []const u8,
+) void {
+    var header_buf: [256]u8 = undefined;
+    const header = std.fmt.bufPrint(
+        &header_buf,
+        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
+        .{ code, reason, content_type, body.len },
+    ) catch {
+        std.log.err("header format failed", .{});
+        return;
+    };
+
+    stream.writeAll(header) catch |err| {
+        std.log.err("write header failed: {s}", .{@errorName(err)});
+        return;
+    };
+    stream.writeAll(body) catch |err| {
+        std.log.err("write body failed: {s}", .{@errorName(err)});
+    };
+}
+
+fn parsePath(request: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, request, ' ')) |method_end| {
+        const start = method_end + 1;
+        if (start >= request.len) return "/";
+        const rest = request[start..];
+        if (std.mem.indexOfScalar(u8, rest, ' ')) |len| {
+            return rest[0..len];
+        }
+        return rest;
+    }
+    return "/";
+}

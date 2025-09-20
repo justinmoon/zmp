@@ -1,4 +1,4 @@
-package com.example.demo
+package __APP_ID__
 
 import android.os.Bundle
 import android.webkit.WebView

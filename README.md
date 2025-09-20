@@ -12,11 +12,11 @@ Quickstart
       - Runs `adb reverse tcp:8085 tcp:8085`
       - Generates Gradle wrapper if missing (`gradle -p android wrapper`)
       - Builds/installs debug APK and launches the app
-  - Native FFI sample (no host server):
+  - Native counter server (runs inside the app):
     - `cd demo`
     - `../zig-out/bin/zmp dev android --port 8085 --native`
-      - Compiles `native/ffi.zig` to JNI libs for arm64/x86_64
-      - Installs the demo app. The app calls `Native.getNumber()` (implemented in Zig) and displays the result.
+      - Compiles the bundled JNI sources for arm64/x86_64
+      - Starts the embedded Zig HTTP server and points the WebView at it.
 
 Prerequisites
 
@@ -28,30 +28,29 @@ Prerequisites
 Bundled demo project
 
 - `demo/` contains a vendored Android project ready to run without `zmp`:
-  - `demo/native/ffi.zig` — exports `Java_*_Native_getNumber` returning `42` (demonstrates FFI).
-  - `demo/build_native.sh` — builds `libzmpserver.so` for `arm64-v8a` and `x86_64` using Zig (no NDK toolchain required).
-  - `demo/android` — standard Gradle project; run `./gradlew :app:installDebug` after building the JNI libs.
+  - `demo/native/ffi.zig` — JNI entry points (including `getauxval`) used by the counter server.
+  - `demo/native/server.zig` — Zig HTTP counter service exposed to Android via JNI.
+  - `demo/native/static/index.html` — HTML template used by the counter UI.
+  - `demo/android` — standard Gradle project; run `../zig-out/bin/zmp dev android --project demo --port 8085 --native` to rebuild and install.
 - You can iterate on the demo by:
   1. `cd demo`
-  2. `./build_native.sh`
-  3. `./android/gradlew installDebug`
+  2. `../zig-out/bin/zmp dev android --port 8085 --native`
 
 Notes
 
-- Dev mode points the Android WebView to `http://127.0.0.1:<PORT>`; the native FFI sample shows how to call into Zig without the host server.
+- Dev mode points the Android WebView to `http://127.0.0.1:<PORT>`; use `--native` to run the embedded Zig server on the device.
 - Cleartext to 127.0.0.1 is allowed by `network_security_config.xml`.
-- Native mode currently exposes a stub `startServer` for future work; it simply does nothing in the FFI sample.
 
 - UI automation (Appium + WebdriverIO)
 
 - `ui-tests/` contains headless UI checks using Bun + WebdriverIO + Appium.
 - Typical flow:
   1. Start an emulator (headless) and wait for boot.
-  2. Build/install the app (e.g. `scripts/e2e.sh` or `../zig-out/bin/zmp dev ... --native`).
+  2. Build/install the app (e.g. `scripts/test-e2e.sh --mode host` or `../zig-out/bin/zmp dev ... --native`).
   3. `cd ui-tests && bun install` (first time).
   4. `ZMP_APP_PACKAGE=com.example.demo bun run test`.
-- `scripts/test-ui.sh` wraps the entire flow (builds the app with `NATIVE=1`, installs it, then launches the UI assertion). Run from repo root inside `nix develop`.
-- The script asserts the app shows `Zig says: 42` sourced from the Zig JNI call. See `ui-tests/README.md` for configuration options.
+- `scripts/test-e2e.sh --mode native --with-ui` runs the entire flow end-to-end (project scaffolding, build/install, Appium assertion). Run from repo root inside `nix develop`.
+- The UI harness switches into the WebView context and asserts the counter reads `Count: 0`. See `ui-tests/README.md` for configuration options.
 
 Nix flake
 

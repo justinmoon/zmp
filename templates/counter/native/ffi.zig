@@ -21,13 +21,13 @@ pub export fn getauxval(tag: usize) callconv(.c) usize {
     return readAux(tag);
 }
 
-pub export fn Java_com_example_demo_Native_getNumberNative(env: ?*anyopaque, clazz: ?*anyopaque) callconv(.c) i32 {
+pub export fn Java___JNI_PREFIX___Native_getNumberNative(env: ?*anyopaque, clazz: ?*anyopaque) callconv(.c) i32 {
     _ = env;
     _ = clazz;
     return 42;
 }
 
-pub export fn Java_com_example_demo_Native_startServerNative(env: ?*anyopaque, clazz: ?*anyopaque, port: i32) callconv(.c) void {
+pub export fn Java___JNI_PREFIX___Native_startServerNative(env: ?*anyopaque, clazz: ?*anyopaque, port: i32) callconv(.c) void {
     _ = env;
     _ = clazz;
     if (port < 0 or port > std.math.maxInt(u16)) return;

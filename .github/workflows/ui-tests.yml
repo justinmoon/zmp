@@ -9,13 +9,17 @@ jobs:
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [host, native]
     steps:
       - uses: actions/checkout@v4
 
       - uses: DeterminateSystems/nix-installer-action@v1
       - uses: DeterminateSystems/magic-nix-cache-action@v1
 
-      - name: Run UI smoke test
+      - name: Run UI smoke test (${{ matrix.mode }})
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -23,4 +27,4 @@ jobs:
           profile: pixel_5
           headless: true
           script: |
-            nix develop --command bash scripts/test-ui.sh
+            nix develop --command bash -lc "scripts/test-e2e.sh --mode ${{ matrix.mode }} --with-ui"

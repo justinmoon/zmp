@@ -11,8 +11,12 @@ const port = Number(process.env.ZMP_APPIUM_PORT ?? "4723");
 const appPackage = process.env.ZMP_APP_PACKAGE ?? "com.example.demo";
 const appActivity = process.env.ZMP_APP_ACTIVITY ?? ".MainActivity";
 const deviceName = process.env.ZMP_DEVICE_NAME ?? "Android Emulator";
-const expectText = process.env.ZMP_EXPECT_TEXT ?? "Zig says: 42";
-const selector = process.env.ZMP_EXPECT_SELECTOR ?? 'android=new UiSelector().textContains("Zig says")';
+const expectContext = (process.env.ZMP_EXPECT_CONTEXT ?? "web").toLowerCase();
+const nativeSelector = process.env.ZMP_EXPECT_SELECTOR ?? process.env.ZMP_NATIVE_SELECTOR ?? 'android=new UiSelector().textContains("Zig says")';
+const nativeExpect = process.env.ZMP_EXPECT_TEXT ?? process.env.ZMP_NATIVE_EXPECT ?? "Zig says: 42";
+const webSelector = process.env.ZMP_WEB_SELECTOR ?? "#count";
+const webExpect = process.env.ZMP_WEB_EXPECT ?? "Count: 0";
+const webContextMatch = (process.env.ZMP_WEB_CONTEXT_MATCH ?? "webview").toLowerCase();
 const driverSpec = process.env.ZMP_APPIUM_DRIVER ?? "uiautomator2@2.27.0";
 const appiumHome = path.resolve(process.env.APPIUM_HOME ?? path.join(process.cwd(), ".appium"));
 const appiumBin = process.env.ZMP_APPIUM_BIN ?? "appium";
@@ -54,6 +58,7 @@ async function ensureUiAutomator2() {
 
 async function startAppium() {
   const args = ["--base-path", "/", "--address", host, "--port", String(port)];
+  args.push("--allow-insecure", "chromedriver_autodownload");
   const child = spawnAppium(args, { stdio: ["ignore", "pipe", "pipe"] });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -94,6 +99,20 @@ async function stopAppium(child) {
   }
 }
 
+async function waitForWebContext(client, match) {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const contexts = await client.getContexts();
+    console.log("Available contexts:", contexts);
+    const target = contexts.find((ctx) => ctx.toLowerCase().includes(match));
+    if (target) {
+      return target;
+    }
+    await delay(500);
+  }
+  throw new Error(`WebView context containing '${match}' not found`);
+}
+
 async function run() {
   await ensureUiAutomator2();
   const appium = await startAppium();
@@ -111,17 +130,33 @@ async function run() {
         "appium:appPackage": appPackage,
         "appium:appActivity": appActivity,
         "appium:noReset": true,
+        "appium:chromedriverAutodownload": true,
       },
     });
 
     await client.activateApp(appPackage);
-    const element = await client.$(selector);
-    await element.waitForExist({ timeout: 15000 });
-    const text = await element.getText();
-    if (text !== expectText) {
-      throw new Error(`Expected "${expectText}", got "${text}"`);
+    if (expectContext === "web") {
+      const context = await waitForWebContext(client, webContextMatch);
+      await client.switchContext(context);
+      const source = await client.getPageSource();
+      console.log("WebView source:", source);
+      const element = await client.$(webSelector);
+      await element.waitForExist({ timeout: 15000 });
+      const text = (await element.getText()).trim();
+      if (text !== webExpect) {
+        throw new Error(`Expected "${webExpect}", got "${text}"`);
+      }
+      console.log(`✔ WebView assertion passed (found: ${text})`);
+      await client.switchContext("NATIVE_APP");
+    } else {
+      const element = await client.$(nativeSelector);
+      await element.waitForExist({ timeout: 15000 });
+      const text = await element.getText();
+      if (text !== nativeExpect) {
+        throw new Error(`Expected "${nativeExpect}", got "${text}"`);
+      }
+      console.log(`✔ Native assertion passed (found: ${text})`);
     }
-    console.log(`✔ UI assertion passed (found: ${text})`);
   } finally {
     if (client) {
       await client.deleteSession().catch(() => {});

@@ -139,6 +139,8 @@ if [[ "$WITH_UI" -eq 1 ]]; then
     export ZMP_WEB_EXPECT="${ZMP_WEB_EXPECT:-Count: 0}"
   fi
   export ZMP_DEVICE_NAME="${ZMP_DEVICE_NAME:-Android Emulator}"
+  adb shell am force-stop com.example.demo >/dev/null 2>&1 || true
+  adb shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
   bun run test
   cd "$REPO_ROOT"
 else

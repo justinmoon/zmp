@@ -53,14 +53,17 @@ fn handleConn(conn: std.net.Server.Connection) void {
 
     const is_root = std.mem.eql(u8, path, "/");
     const is_increment = std.mem.eql(u8, path, "/inc");
+    const is_decrement = std.mem.eql(u8, path, "/dec");
 
-    if (!is_root and !is_increment) {
+    if (!is_root and !is_increment and !is_decrement) {
         sendStatus(&stream, 404, "Not Found", "text/plain; charset=utf-8", "not found");
         return;
     }
 
     const count: u64 = if (is_increment)
-        counter.fetchAdd(1, .acq_rel) + 1
+        increment()
+    else if (is_decrement)
+        decrement()
     else
         counter.load(.acquire);
 
@@ -92,6 +95,20 @@ fn renderCount(count: u64, buffer: []u8) ![]const u8 {
 
 fn sendHtml(stream: *std.net.Stream, body: []const u8) void {
     sendStatus(stream, 200, "OK", "text/html; charset=utf-8", body);
+}
+
+fn increment() u64 {
+    return counter.fetchAdd(1, .acq_rel) + 1;
+}
+
+fn decrement() u64 {
+    while (true) {
+        const current = counter.load(.acquire);
+        if (current == 0) return 0;
+        if (counter.cmpxchgWeak(current, current - 1, .acq_rel, .acquire) == null) {
+            return current - 1;
+        }
+    }
 }
 
 fn sendStatus(

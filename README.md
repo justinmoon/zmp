@@ -35,6 +35,7 @@ Bundled demo project
 - You can iterate on the demo by:
   1. `cd demo`
   2. `../zig-out/bin/zmp dev android --port 8085 --native`
+  - The counter view includes increment/decrement buttons that exercise the Zig HTTP server on each request.
 
 Notes
 

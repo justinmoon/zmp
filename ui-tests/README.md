@@ -55,4 +55,4 @@ Environment variables:
 3. `cd ui-tests && bun install`
 4. `ZMP_APP_PACKAGE=... bun run test`
 
-The harness spawns Appium, connects via WebdriverIO, switches into the WebView context, and asserts the counter reads `Count: 0`.
+The harness spawns Appium, connects via WebdriverIO, switches into the WebView context, validates the initial count, clicks the increment and decrement buttons, and confirms the counter updates after each interaction.

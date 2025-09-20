@@ -16,10 +16,26 @@ const nativeSelector = process.env.ZMP_EXPECT_SELECTOR ?? process.env.ZMP_NATIVE
 const nativeExpect = process.env.ZMP_EXPECT_TEXT ?? process.env.ZMP_NATIVE_EXPECT ?? "Zig says: 42";
 const webSelector = process.env.ZMP_WEB_SELECTOR ?? "#count";
 const webExpect = process.env.ZMP_WEB_EXPECT ?? "Count: 0";
+const incSelector = process.env.ZMP_WEB_INC ?? "#inc";
+const decSelector = process.env.ZMP_WEB_DEC ?? "#dec";
 const webContextMatch = (process.env.ZMP_WEB_CONTEXT_MATCH ?? "webview").toLowerCase();
 const driverSpec = process.env.ZMP_APPIUM_DRIVER ?? "uiautomator2@2.27.0";
 const appiumHome = path.resolve(process.env.APPIUM_HOME ?? path.join(process.cwd(), ".appium"));
 const appiumBin = process.env.ZMP_APPIUM_BIN ?? "appium";
+
+const baseCountMatch = webExpect.match(/-?\d+/);
+const baseCount = baseCountMatch ? Number(baseCountMatch[0]) : 0;
+const countFormat = (value) => {
+  if (process.env.ZMP_WEB_EXPECT_TEMPLATE) {
+    return process.env.ZMP_WEB_EXPECT_TEMPLATE.replace("{COUNT}", String(value));
+  }
+  if (baseCountMatch) {
+    return webExpect.replace(baseCountMatch[0], String(value));
+  }
+  return `Count: ${value}`;
+};
+const webExpectInc = process.env.ZMP_WEB_EXPECT_INC ?? countFormat(baseCount + 1);
+const webExpectDec = process.env.ZMP_WEB_EXPECT_DEC ?? countFormat(baseCount);
 
 function spawnAppium(args, options = {}) {
   const env = { ...process.env, APPIUM_HOME: appiumHome, ...(options.env ?? {}) };
@@ -99,11 +115,17 @@ async function stopAppium(child) {
   }
 }
 
-async function waitForWebContext(client, match) {
+async function waitForWebContext(client, match, preferred) {
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
     const contexts = await client.getContexts();
     console.log("Available contexts:", contexts);
+    if (preferred) {
+      const preferredContext = contexts.find((ctx) => ctx.toLowerCase().includes(preferred));
+      if (preferredContext) {
+        return preferredContext;
+      }
+    }
     const target = contexts.find((ctx) => ctx.toLowerCase().includes(match));
     if (target) {
       return target;
@@ -136,17 +158,15 @@ async function run() {
 
     await client.activateApp(appPackage);
     if (expectContext === "web") {
-      const context = await waitForWebContext(client, webContextMatch);
+      const context = await waitForWebContext(client, webContextMatch, appPackage.toLowerCase());
       await client.switchContext(context);
       const source = await client.getPageSource();
       console.log("WebView source:", source);
-      const element = await client.$(webSelector);
-      await element.waitForExist({ timeout: 15000 });
-      const text = (await element.getText()).trim();
-      if (text !== webExpect) {
-        throw new Error(`Expected "${webExpect}", got "${text}"`);
-      }
-      console.log(`✔ WebView assertion passed (found: ${text})`);
+
+      await assertCount(client, webExpect);
+      await clickAndAssert(client, incSelector, webExpectInc, "increment");
+      await clickAndAssert(client, decSelector, webExpectDec, "decrement");
+
       await client.switchContext("NATIVE_APP");
     } else {
       const element = await client.$(nativeSelector);
@@ -169,3 +189,29 @@ run().catch((err) => {
   console.error(err);
   process.exitCode = 1;
 });
+
+async function getCountText(client) {
+  const element = await client.$(webSelector);
+  await element.waitForExist({ timeout: 15000 });
+  return (await element.getText()).trim();
+}
+
+async function assertCount(client, expected) {
+  const text = await getCountText(client);
+  if (text !== expected) {
+    throw new Error(`Expected "${expected}", got "${text}"`);
+  }
+  console.log(`✔ WebView assertion passed (found: ${text})`);
+}
+
+async function clickAndAssert(client, selector, expected, label) {
+  const button = await client.$(selector);
+  await button.waitForExist({ timeout: 15000 });
+  await button.click();
+  await client.waitUntil(async () => (await getCountText(client)) === expected, {
+    timeout: 10000,
+    interval: 250,
+    timeoutMsg: `Timed out waiting for ${label} result: ${expected}`,
+  });
+  console.log(`✔ WebView ${label} updated count to ${expected}`);
+}

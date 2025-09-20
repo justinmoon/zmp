@@ -1,0 +1,4 @@
+[app]
+name="demo"
+app_id="com.example.demo"
+port=8085

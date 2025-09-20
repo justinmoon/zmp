@@ -53,7 +53,6 @@
             build-tools-34-0-0
             emulator
             (sysimg sdkPkgs)
-            ndk-26-1
           ]);
         in {
           default = pkgs.mkShell {
@@ -68,7 +67,7 @@
             shellHook = ''
               # Add Android tools to PATH (adb, avdmanager, emulator)
               export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/emulator:$PATH"
-              # Best-effort ANDROID_NDK_ROOT export (resolve the single installed NDK)
+              # Best-effort ANDROID_NDK_ROOT export if an NDK is present
               if [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
                 export ANDROID_NDK_ROOT="$(echo "$ANDROID_SDK_ROOT"/ndk/* | awk '{print $1}')"
               fi

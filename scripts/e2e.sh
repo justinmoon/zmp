@@ -8,6 +8,7 @@ set -euo pipefail
 # - Runs `zmp dev android` which auto-provisions an emulator if needed
 
 PORT="${PORT:-8085}"
+NATIVE="${NATIVE:-0}"
 APP_NAME="${APP_NAME:-zmp_e2e_demo}"
 APP_ID="${APP_ID:-com.example.zmpe2e}"
 
@@ -31,10 +32,11 @@ echo "- temp dir: $TMPDIR"
 pushd "$TMPDIR" >/dev/null
 "$REPO_ROOT/zig-out/bin/zmp" new "$APP_NAME" --app-id "$APP_ID" --port "$PORT"
 
-echo "[3/5] Starting local HTTP server at 127.0.0.1:$PORT"
-SERVE_DIR="$TMPDIR/www"
-mkdir -p "$SERVE_DIR"
-cat > "$SERVE_DIR/index.html" <<'HTML'
+if [[ "$NATIVE" -eq 0 ]]; then
+  echo "[3/5] Starting local HTTP server at 127.0.0.1:$PORT"
+  SERVE_DIR="$TMPDIR/www"
+  mkdir -p "$SERVE_DIR"
+  cat > "$SERVE_DIR/index.html" <<'HTML'
 <!doctype html>
 <html>
 <head><meta charset="utf-8"><title>ZMP E2E</title></head>
@@ -48,17 +50,24 @@ cat > "$SERVE_DIR/index.html" <<'HTML'
   </body>
 </html>
 HTML
-python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$SERVE_DIR" >/dev/null 2>&1 &
-HTTP_PID=$!
-cleanup() {
-  kill "$HTTP_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
+  python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$SERVE_DIR" >/dev/null 2>&1 &
+  HTTP_PID=$!
+  cleanup() {
+    kill "$HTTP_PID" 2>/dev/null || true
+  }
+  trap cleanup EXIT
+else
+  echo "[3/5] Native mode requested (no host HTTP server)"
+fi
 
 echo "[4/5] Building and launching Android app (this may take a while)"
 (
   cd "$TMPDIR/$APP_NAME"
-  "$REPO_ROOT/zig-out/bin/zmp" dev android --port "$PORT"
+  if [[ "$NATIVE" -eq 1 ]]; then
+    "$REPO_ROOT/zig-out/bin/zmp" dev android --port "$PORT" --native
+  else
+    "$REPO_ROOT/zig-out/bin/zmp" dev android --port "$PORT"
+  fi
 )
 
 echo "[5/5] Done. App should be open in the emulator/device."

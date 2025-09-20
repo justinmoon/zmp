@@ -4,8 +4,8 @@ const builtin = @import("builtin");
 const USAGE: []const u8 =
     "zmp - Zig Mobile Platform (M1 dev)\n"
     ++ "Usage:\n"
-    ++ "  zmp new <name> [--app-id <id>] [--port <port>] [--native-server]\n"
-    ++ "  zmp dev android [--project <path>] [--port <port>]\n"
+    ++ "  zmp new <name> [--app-id <id>] [--port <port>]\n"
+    ++ "  zmp dev android [--project <path>] [--port <port>] [--native]\n"
     ++ "\n"
     ++ "Examples:\n"
     ++ "  zmp new myapp --app-id com.example.myapp --port 8085\n"
@@ -191,9 +191,11 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
 
     var p1: [16]u8 = undefined;
     var p2: [16]u8 = undefined;
-    const tcp1 = try std.fmt.bufPrint(&p1, "tcp:{d}", .{port});
-    const tcp2 = try std.fmt.bufPrint(&p2, "tcp:{d}", .{port});
-    try runCmd(&.{ "adb", "reverse", tcp1, tcp2 });
+    if (!use_native) {
+        const tcp1 = try std.fmt.bufPrint(&p1, "tcp:{d}", .{port});
+        const tcp2 = try std.fmt.bufPrint(&p2, "tcp:{d}", .{port});
+        try runCmd(&.{ "adb", "reverse", tcp1, tcp2 });
+    }
 
     var has_wrapper = blk: {
         var android = try proj.openDir("android", .{ .iterate = true });
@@ -600,7 +602,7 @@ fn writeAndroidProject(allocator: std.mem.Allocator, android_dir: std.fs.Dir, na
     var nw = n_buf.writer();
     try nw.writeAll("package ");
     try nw.print("{s}", .{app_id});
-    try nw.writeAll("\n\nobject Native {\n  init { System.loadLibrary(\"zmpserver\") }\n  external fun startServer(port: Int)\n}\n");
+    try nw.writeAll("\n\nobject Native {\n  init { System.loadLibrary(\"zmpserver\") }\n  @JvmStatic external fun startServer(port: Int)\n}\n");
     const native_kt = try n_buf.toOwnedSlice();
     defer allocator.free(native_kt);
     try writeFile(pkg_dir, "Native.kt", native_kt);
@@ -646,15 +648,16 @@ fn writeNativeServer(allocator: std.mem.Allocator, proj_dir: std.fs.Dir, app_id:
     defer sbuf.deinit();
     var w = sbuf.writer();
     try w.writeAll("const std = @import(\"std\");\n\n");
-    try w.writeAll("var started: std.atomic.Value(u8) = .{ .value = 0 };\n");
-    try w.writeAll("var counter: std.atomic.Value(u64) = .{ .value = 0 };\n\n");
+    try w.writeAll("var started = std.atomic.Value(u8).init(0);\n");
+    try w.writeAll("var counter = std.atomic.Value(u64).init(0);\n\n");
     try w.writeAll("fn serverMain(port: u16) !void {\n");
-    try w.writeAll("    var addr = try std.net.Address.parseIp4(\"127.0.0.1\", port);\n");
-    try w.writeAll("    var tcp = try std.net.tcpListen(addr);\n");
-    try w.writeAll("    defer tcp.deinit();\n");
+    try w.writeAll("    const addr = try std.net.Address.parseIp4(\"127.0.0.1\", port);\n");
+    try w.writeAll("    var server = try std.net.Address.listen(addr, .{});\n");
+    try w.writeAll("    defer server.deinit();\n");
     try w.writeAll("    while (true) {\n");
-    try w.writeAll("        var conn = try tcp.accept();\n");
-    try w.writeAll("        _ = try std.Thread.spawn(.{}, handleConn, .{conn});\n");
+    try w.writeAll("        const conn = try server.accept();\n");
+    try w.writeAll("        const t = try std.Thread.spawn(.{}, handleConn, .{conn});\n");
+    try w.writeAll("        t.detach();\n");
     try w.writeAll("    }\n");
     try w.writeAll("}\n\n");
     try w.writeAll("fn handleConn(conn: std.net.Server.Connection) !void {\n");
@@ -687,14 +690,15 @@ fn writeNativeServer(allocator: std.mem.Allocator, proj_dir: std.fs.Dir, app_id:
     try w.writeAll("}\n\n");
     try w.writeAll("export fn ");
     try w.writeAll(jni_sym);
-    try w.writeAll("(env: ?*anyopaque, clazz: ?*anyopaque, port: c_int) void {\n");
+    try w.writeAll("(env: ?*anyopaque, clazz: ?*anyopaque, port: c_int) callconv(.c) void {\n");
     try w.writeAll("    _ = env; _ = clazz;\n");
     try w.writeAll("    const prev = started.swap(1, .seq_cst);\n");
     try w.writeAll("    if (prev == 1) return; // already started\n");
-    try w.writeAll("    _ = std.Thread.spawn(.{}, start, .{@intCast(u16, port)}) catch return;\n");
+    try w.writeAll("    const t = std.Thread.spawn(.{}, start, .{@as(u16, @intCast(port))}) catch return;\n");
+    try w.writeAll("    t.detach();\n");
     try w.writeAll("}\n\n");
     try w.writeAll("fn start(port: u16) void {\n");
-    try w.writeAll("    serverMain(port) catch |e| { _ = e; };\n");
+    try w.writeAll("    serverMain(port) catch {};\n");
     try w.writeAll("}\n");
 
     const server_zig = try sbuf.toOwnedSlice();

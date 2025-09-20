@@ -27,4 +27,4 @@ jobs:
           profile: pixel_5
           headless: true
           script: |
-            nix develop --command bash -lc "scripts/test-e2e.sh --mode ${{ matrix.mode }} --with-ui"
+            nix develop --command bash -lc "scripts/test-e2e.sh --mode ${{ matrix.mode }}"

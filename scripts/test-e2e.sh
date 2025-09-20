@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODE="host"
-WITH_UI=0
+RUN_UI=1
 PORT=8085
 APP_NAME="${APP_NAME:-zmp_e2e_demo}"
 APP_ID="${APP_ID:-com.example.zmpe2e}"
@@ -10,7 +10,7 @@ KEEP_TEMP=0
 
 print_usage() {
   cat <<USAGE
-Usage: scripts/test-e2e.sh [--mode host|native] [--with-ui] [--port <number>] [--keep-temp]
+Usage: scripts/test-e2e.sh [--mode host|native] [--skip-ui-tests] [--port <number>] [--keep-temp]
 
 Environment variables:
   APP_NAME   (default: zmp_e2e_demo)
@@ -25,8 +25,8 @@ while [[ $# -gt 0 ]]; do
       MODE="${2:-}"
       shift 2
       ;;
-    --with-ui)
-      WITH_UI=1
+    --skip-ui-tests)
+      RUN_UI=0
       shift
       ;;
     --port)
@@ -72,7 +72,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 require zig
 require adb
 
-if [[ "$WITH_UI" -eq 1 ]]; then
+if [[ "$RUN_UI" -eq 1 ]]; then
   require bun
 fi
 
@@ -124,7 +124,7 @@ fi
 echo "[5/6] Waiting briefly for app to settle"
 sleep 5
 
-if [[ "$WITH_UI" -eq 1 ]]; then
+if [[ "$RUN_UI" -eq 1 ]]; then
   echo "[6/6] Running UI assertions"
   cd "$REPO_ROOT/ui-tests"
   bun install >/dev/null
@@ -144,7 +144,7 @@ if [[ "$WITH_UI" -eq 1 ]]; then
   bun run test
   cd "$REPO_ROOT"
 else
-  echo "[6/6] UI step skipped"
+  echo "[6/6] UI tests skipped"
 fi
 
 echo "Done. Project directory: $PROJECT_DIR"

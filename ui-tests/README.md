@@ -32,10 +32,10 @@ bun run test
 ### One-shot end-to-end run
 
 ```bash
-scripts/test-e2e.sh --mode native --with-ui
+scripts/test-e2e.sh --mode native
 ```
 
-Run it from the repo root inside `nix develop`; it scaffolds a fresh project, installs the sample app in native mode, and triggers the WebView assertion automatically.
+Run it from the repo root inside `nix develop`; it scaffolds a fresh project, installs the sample app in native mode, and drives the WebView assertions automatically. Add `--skip-ui-tests` if you only need the build/install smoke pass.
 
 Environment variables:
 
@@ -51,7 +51,7 @@ Environment variables:
 ## Typical CI flow
 
 1. Boot emulator (headless) and wait for boot
-2. `scripts/test-e2e.sh --mode native --with-ui`
+2. `scripts/test-e2e.sh --mode native`
 3. `cd ui-tests && bun install`
 4. `ZMP_APP_PACKAGE=... bun run test`
 

@@ -1,4 +1,4 @@
-ZMP (Zig Mobile Platform) — MVP (Android dev mode)
+# ZMP: Zig Multiplatform
 
 Quickstart
 
@@ -50,7 +50,7 @@ Notes
   2. Build/install the app (e.g. `scripts/test-e2e.sh --mode host` or `../zig-out/bin/zmp dev ... --native`).
   3. `cd ui-tests && bun install` (first time).
   4. `ZMP_APP_PACKAGE=com.example.demo bun run test`.
-- `scripts/test-e2e.sh --mode native --with-ui` runs the entire flow end-to-end (project scaffolding, build/install, Appium assertion). Run from repo root inside `nix develop`.
+- `scripts/test-e2e.sh --mode native` runs the entire flow end-to-end (project scaffolding, build/install, Appium assertion). UI tests run by default; append `--skip-ui-tests` for a quicker smoke build.
 - The UI harness switches into the WebView context and asserts the counter reads `Count: 0`. See `ui-tests/README.md` for configuration options.
 
 Nix flake

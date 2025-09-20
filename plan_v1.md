@@ -24,7 +24,7 @@
 2. **Consolidate scripts**
    - Merge `scripts/e2e.sh` and `scripts/test-ui.sh` into a single `scripts/test-e2e.sh` with flags:
      - `--mode host` / `--mode native`
-     - `--with-ui` to run the Bun/Appium assertions.
+     - `--skip-ui-tests` to disable the Bun/Appium assertions.
    - Ensure the script can start/stop the host HTTP server (Python) when in host mode and skip it in native mode.
 
 3. **Appium UI tests**
@@ -33,8 +33,8 @@
 
 4. **CI workflow**
    - Update `.github/workflows/ui-tests.yml` to run the new script in a matrix:
-     - `scripts/test-e2e.sh --mode host --with-ui`
-     - `scripts/test-e2e.sh --mode native --with-ui`
+- `scripts/test-e2e.sh --mode host`
+- `scripts/test-e2e.sh --mode native`
    - Ensure `APPIUM_HOME` and Bun dependencies work in the GitHub Action environment.
 
 5. **Docs**
@@ -48,4 +48,3 @@
   - `scripts/test-e2e.sh --mode host --with-ui`
   - `scripts/test-e2e.sh --mode native --with-ui`
 - Verify both modes inside GitHub Actions using the updated workflow.
-

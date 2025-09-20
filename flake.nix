@@ -31,7 +31,7 @@
             emulator
             (sysimg sdkPkgs)
           ]);
-          androidHome = "${androidSdk}/libexec/android-sdk";
+          androidHome = "${androidSdk}/share/android-sdk";
           baseRuntimeInputs = [
             pkgs.bashInteractive
             pkgs.coreutils

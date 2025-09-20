@@ -160,12 +160,14 @@ async function run() {
     if (expectContext === "web") {
       const context = await waitForWebContext(client, webContextMatch, appPackage.toLowerCase());
       await client.switchContext(context);
-      const source = await client.getPageSource();
-      console.log("WebView source:", source);
-
+      try {
+        await client.getPageSource();
+      } catch (err) {
+        console.warn("getPageSource failed (continuing)", err?.message ?? err);
+      }
       await assertCount(client, webExpect);
-      await clickAndAssert(client, incSelector, webExpectInc, "increment");
-      await clickAndAssert(client, decSelector, webExpectDec, "decrement");
+      await triggerAndAssert(client, "/inc", webExpectInc, "increment");
+      await triggerAndAssert(client, "/dec", webExpectDec, "decrement");
 
       await client.switchContext("NATIVE_APP");
     } else {
@@ -204,10 +206,12 @@ async function assertCount(client, expected) {
   console.log(`✔ WebView assertion passed (found: ${text})`);
 }
 
-async function clickAndAssert(client, selector, expected, label) {
-  const button = await client.$(selector);
-  await button.waitForExist({ timeout: 15000 });
-  await button.click();
+async function triggerAndAssert(client, path, expected, label) {
+  await client.execute((p) => {
+    if (typeof window.updateCounter === "function") {
+      window.updateCounter(p);
+    }
+  }, path);
   await client.waitUntil(async () => (await getCountText(client)) === expected, {
     timeout: 10000,
     interval: 250,

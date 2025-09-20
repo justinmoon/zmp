@@ -262,6 +262,7 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
     }
 
     _ = runCmdSilently(&.{ "adb", "shell", "am", "force-stop", app_id }) catch {};
+    _ = runCmdSilently(&.{ "adb", "reverse", "--remove-all" }) catch {};
 
     var p1: [16]u8 = undefined;
     const tcp_remove = try std.fmt.bufPrint(&p1, "tcp:{d}", .{port});
@@ -285,6 +286,8 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
         has_wrapper = true;
     }
 
+    try ensureLocalProperties(project_path);
+
     if (has_wrapper) {
         if (use_native) {
             try runInDir(project_path, &.{ "bash", "-lc", "cd android && chmod +x ./gradlew && ./gradlew -PzmpNative=true assembleDebug installDebug" });
@@ -304,6 +307,26 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
     try runCmd(&.{ "adb", "shell", "am", "start", "-n", comp });
 
     std.log.info("Launched {s} on device. WebView -> http://127.0.0.1:{d}", .{ app_id, port });
+}
+
+fn ensureLocalProperties(project_path: []const u8) !void {
+    const allocator = std.heap.page_allocator;
+    const sdk_env = std.process.getEnvVarOwned(allocator, "ANDROID_HOME") catch std.process.getEnvVarOwned(allocator, "ANDROID_SDK_ROOT") catch {
+        std.log.warn("ANDROID_HOME/ANDROID_SDK_ROOT not set; relying on Gradle autodetection", .{});
+        return;
+    };
+    defer allocator.free(sdk_env);
+
+    const props_content = try std.fmt.allocPrint(allocator, "sdk.dir={s}\n", .{sdk_env});
+    defer allocator.free(props_content);
+
+    const props_path = try std.fs.path.join(allocator, &.{ project_path, "android", "local.properties" });
+    defer allocator.free(props_path);
+
+    try std.fs.cwd().writeFile(.{
+        .sub_path = props_path,
+        .data = props_content,
+    });
 }
 
 fn countConnectedDevices(allocator: std.mem.Allocator) !usize {

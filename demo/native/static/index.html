@@ -68,9 +68,44 @@
       <p class="subtitle">Zig-driven server rendered UI</p>
       <p id="count">Count: <span id="count-value">{{COUNT}}</span></p>
       <div class="actions">
-        <a id="inc" class="button primary" href="/inc">Increment</a>
-        <a id="dec" class="button secondary" href="/dec">Decrement</a>
+        <a id="inc" class="button primary" href="#">Increment</a>
+        <a id="dec" class="button secondary" href="#">Decrement</a>
       </div>
     </main>
+    <script>
+      function extractCount(html) {
+        const marker = 'id="count-value"';
+        const idx = html.indexOf(marker);
+        if (idx === -1) return null;
+        const start = html.indexOf('>', idx);
+        if (start === -1) return null;
+        const end = html.indexOf('<', start + 1);
+        if (end === -1) return null;
+        return html.slice(start + 1, end).trim();
+      }
+
+      async function updateCounter(path) {
+        try {
+          const res = await fetch(path, { credentials: 'omit' });
+          const text = await res.text();
+          const value = extractCount(text);
+          if (value !== null) {
+            document.getElementById('count-value').textContent = value;
+          }
+        } catch (err) {
+          console.error('counter update failed', err);
+        }
+      }
+
+      document.getElementById('inc').addEventListener('click', (ev) => {
+        ev.preventDefault();
+        updateCounter('/inc');
+      });
+
+      document.getElementById('dec').addEventListener('click', (ev) => {
+        ev.preventDefault();
+        updateCounter('/dec');
+      });
+    </script>
   </body>
 </html>

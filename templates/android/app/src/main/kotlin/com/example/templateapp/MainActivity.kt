@@ -24,6 +24,7 @@ class MainActivity : AppCompatActivity() {
     settings.domStorageEnabled = true
     webView.webViewClient = WebViewClient()
     setContentView(webView)
-    webView.loadUrl("http://127.0.0.1:" + port + "/")
+    val host = "127.0.0.1"
+    webView.loadUrl("http://" + host + ":" + port + "/")
   }
 }

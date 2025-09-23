@@ -11,11 +11,31 @@ const port = Number(process.env.ZMP_APPIUM_PORT ?? "4723");
 const appPackage = process.env.ZMP_APP_PACKAGE ?? "com.example.demo";
 const appActivity = process.env.ZMP_APP_ACTIVITY ?? ".MainActivity";
 const deviceName = process.env.ZMP_DEVICE_NAME ?? "Android Emulator";
-const expectText = process.env.ZMP_EXPECT_TEXT ?? "Zig says: 42";
-const selector = process.env.ZMP_EXPECT_SELECTOR ?? 'android=new UiSelector().textContains("Zig says")';
+const expectContext = (process.env.ZMP_EXPECT_CONTEXT ?? "web").toLowerCase();
+const nativeSelector = process.env.ZMP_EXPECT_SELECTOR ?? process.env.ZMP_NATIVE_SELECTOR ?? 'android=new UiSelector().textContains("Zig says")';
+const nativeExpect = process.env.ZMP_EXPECT_TEXT ?? process.env.ZMP_NATIVE_EXPECT ?? "Zig says: 42";
+const webSelector = process.env.ZMP_WEB_SELECTOR ?? "#count";
+const webExpect = process.env.ZMP_WEB_EXPECT ?? "Count: 0";
+const incSelector = process.env.ZMP_WEB_INC ?? "#inc";
+const decSelector = process.env.ZMP_WEB_DEC ?? "#dec";
+const webContextMatch = (process.env.ZMP_WEB_CONTEXT_MATCH ?? "webview").toLowerCase();
 const driverSpec = process.env.ZMP_APPIUM_DRIVER ?? "uiautomator2@2.27.0";
 const appiumHome = path.resolve(process.env.APPIUM_HOME ?? path.join(process.cwd(), ".appium"));
 const appiumBin = process.env.ZMP_APPIUM_BIN ?? "appium";
+
+const baseCountMatch = webExpect.match(/-?\d+/);
+const baseCount = baseCountMatch ? Number(baseCountMatch[0]) : 0;
+const countFormat = (value) => {
+  if (process.env.ZMP_WEB_EXPECT_TEMPLATE) {
+    return process.env.ZMP_WEB_EXPECT_TEMPLATE.replace("{COUNT}", String(value));
+  }
+  if (baseCountMatch) {
+    return webExpect.replace(baseCountMatch[0], String(value));
+  }
+  return `Count: ${value}`;
+};
+const webExpectInc = process.env.ZMP_WEB_EXPECT_INC ?? countFormat(baseCount + 1);
+const webExpectDec = process.env.ZMP_WEB_EXPECT_DEC ?? countFormat(baseCount);
 
 function spawnAppium(args, options = {}) {
   const env = { ...process.env, APPIUM_HOME: appiumHome, ...(options.env ?? {}) };
@@ -54,6 +74,7 @@ async function ensureUiAutomator2() {
 
 async function startAppium() {
   const args = ["--base-path", "/", "--address", host, "--port", String(port)];
+  args.push("--allow-insecure", "chromedriver_autodownload");
   const child = spawnAppium(args, { stdio: ["ignore", "pipe", "pipe"] });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -94,6 +115,26 @@ async function stopAppium(child) {
   }
 }
 
+async function waitForWebContext(client, match, preferred) {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const contexts = await client.getContexts();
+    console.log("Available contexts:", contexts);
+    if (preferred) {
+      const preferredContext = contexts.find((ctx) => ctx.toLowerCase().includes(preferred));
+      if (preferredContext) {
+        return preferredContext;
+      }
+    }
+    const target = contexts.find((ctx) => ctx.toLowerCase().includes(match));
+    if (target) {
+      return target;
+    }
+    await delay(500);
+  }
+  throw new Error(`WebView context containing '${match}' not found`);
+}
+
 async function run() {
   await ensureUiAutomator2();
   const appium = await startAppium();
@@ -111,17 +152,33 @@ async function run() {
         "appium:appPackage": appPackage,
         "appium:appActivity": appActivity,
         "appium:noReset": true,
+        "appium:chromedriverAutodownload": true,
       },
     });
 
     await client.activateApp(appPackage);
-    const element = await client.$(selector);
-    await element.waitForExist({ timeout: 15000 });
-    const text = await element.getText();
-    if (text !== expectText) {
-      throw new Error(`Expected "${expectText}", got "${text}"`);
+    if (expectContext === "web") {
+      const context = await waitForWebContext(client, webContextMatch, appPackage.toLowerCase());
+      await client.switchContext(context);
+      try {
+        await client.getPageSource();
+      } catch (err) {
+        console.warn("getPageSource failed (continuing)", err?.message ?? err);
+      }
+      await assertCount(client, webExpect);
+      await triggerAndAssert(client, "/inc", webExpectInc, "increment");
+      await triggerAndAssert(client, "/dec", webExpectDec, "decrement");
+
+      await client.switchContext("NATIVE_APP");
+    } else {
+      const element = await client.$(nativeSelector);
+      await element.waitForExist({ timeout: 15000 });
+      const text = await element.getText();
+      if (text !== nativeExpect) {
+        throw new Error(`Expected "${nativeExpect}", got "${text}"`);
+      }
+      console.log(`✔ Native assertion passed (found: ${text})`);
     }
-    console.log(`✔ UI assertion passed (found: ${text})`);
   } finally {
     if (client) {
       await client.deleteSession().catch(() => {});
@@ -134,3 +191,31 @@ run().catch((err) => {
   console.error(err);
   process.exitCode = 1;
 });
+
+async function getCountText(client) {
+  const element = await client.$(webSelector);
+  await element.waitForExist({ timeout: 15000 });
+  return (await element.getText()).trim();
+}
+
+async function assertCount(client, expected) {
+  const text = await getCountText(client);
+  if (text !== expected) {
+    throw new Error(`Expected "${expected}", got "${text}"`);
+  }
+  console.log(`✔ WebView assertion passed (found: ${text})`);
+}
+
+async function triggerAndAssert(client, path, expected, label) {
+  await client.execute((p) => {
+    if (typeof window.updateCounter === "function") {
+      window.updateCounter(p);
+    }
+  }, path);
+  await client.waitUntil(async () => (await getCountText(client)) === expected, {
+    timeout: 10000,
+    interval: 250,
+    timeoutMsg: `Timed out waiting for ${label} result: ${expected}`,
+  });
+  console.log(`✔ WebView ${label} updated count to ${expected}`);
+}

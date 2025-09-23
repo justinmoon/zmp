@@ -1,26 +1,60 @@
 name: UI Tests
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
-
+  workflow_dispatch:
+  
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, nixos, hetzner, zmp]
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [host, native]
     steps:
+      - name: Enforce temporary PR author restriction
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'justinmoon' }}
+        run: |
+          echo "CI currently runs only for PRs opened by @justinmoon." >&2
+          exit 1
+
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@v1
-      - uses: DeterminateSystems/magic-nix-cache-action@v1
+      - name: Verify nix installation
+        run: nix --version
 
-      - name: Run UI smoke test
+      - name: Provide ci toolchain in PATH
+        run: |
+          set -eu
+          TOOL_DIR="$RUNNER_TEMP/zmp-tools"
+          mkdir -p "$TOOL_DIR"
+          CI_TOOLS=$(nix build .#ci-tools --no-link --print-out-paths)
+          cp "$CI_TOOLS"/bin/unzip "$TOOL_DIR/"
+          if [ -f "$CI_TOOLS/bin/zip" ]; then
+            cp "$CI_TOOLS"/bin/zip "$TOOL_DIR/"
+          fi
+          cp "$CI_TOOLS"/bin/adb "$TOOL_DIR/adb-real"
+          cat <<'EOS' > "$TOOL_DIR/adb"
+#!/usr/bin/env bash
+set -euo pipefail
+real="$(dirname "$0")/adb-real"
+if [[ "${1:-}" == "-s" && "${3:-}" == "emu" && "${4:-}" == "kill" ]]; then
+  "$real" "$@" >/dev/null 2>&1 || true
+  exit 0
+fi
+exec "$real" "$@"
+EOS
+          chmod +x "$TOOL_DIR"/adb-real "$TOOL_DIR"/adb
+          echo "$TOOL_DIR" >> "$GITHUB_PATH"
+
+      - name: Run UI smoke test (${{ matrix.mode }})
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           arch: x86_64
           profile: pixel_5
-          headless: true
+          emulator-options: "-no-window -no-audio -gpu swiftshader_indirect -no-snapshot"
+          emulator-boot-timeout: 600000
           script: |
-            nix develop --command bash scripts/test-ui.sh
+            nix run .#ci -- --mode ${{ matrix.mode }}

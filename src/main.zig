@@ -1,15 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Template = enum {
+    counter,
+    ffi,
+};
+
 const USAGE: []const u8 =
-    "zmp - Zig Mobile Platform (M1 dev)\n"
-    ++ "Usage:\n"
-    ++ "  zmp new <name> [--app-id <id>] [--port <port>]\n"
-    ++ "  zmp dev android [--project <path>] [--port <port>] [--native]\n"
-    ++ "\n"
-    ++ "Examples:\n"
-    ++ "  zmp new myapp --app-id com.example.myapp --port 8085\n"
-    ++ "  zmp dev android --project myapp --port 8085\n";
+    "zmp - Zig Mobile Platform (M1 dev)\n" ++ "Usage:\n" ++ "  zmp new <name> [--app-id <id>] [--port <port>] [--template <counter|ffi>]\n" ++ "  zmp dev android [--project <path>] [--port <port>] [--native]\n" ++ "\n" ++ "Examples:\n" ++ "  zmp new myapp --app-id com.example.myapp --port 8085\n" ++ "  zmp dev android --project myapp --port 8085\n";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -33,7 +31,9 @@ pub fn main() !void {
     }
 }
 
-fn printUsage() !void { std.debug.print("{s}", .{USAGE}); }
+fn printUsage() !void {
+    std.debug.print("{s}", .{USAGE});
+}
 
 fn cmdNew(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     const name = args.next() orelse {
@@ -48,18 +48,28 @@ fn cmdNew(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     app_id = app_id_buf;
 
     var port: u16 = 8085;
+    var template: Template = .counter;
 
     while (args.next()) |flag| {
         if (std.mem.eql(u8, flag, "--app-id")) {
             if (args.next()) |val| app_id = val else break;
         } else if (std.mem.eql(u8, flag, "--port")) {
             if (args.next()) |val| port = std.fmt.parseUnsigned(u16, val, 10) catch port else break;
+        } else if (std.mem.eql(u8, flag, "--template")) {
+            if (args.next()) |val| {
+                template = parseTemplate(val) catch |err| switch (err) {
+                    error.UnknownTemplate => {
+                        std.log.err("unknown template: {s}", .{val});
+                        return printUsage();
+                    },
+                };
+            } else break;
         } else {
             std.log.warn("unknown flag: {s}", .{flag});
         }
     }
 
-    try createProject(allocator, name, app_id, port);
+    try createProject(allocator, name, app_id, port, template);
 }
 
 fn cmdDev(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
@@ -116,25 +126,64 @@ fn ensureNixDevelop() !void {
     defer std.heap.page_allocator.free(val);
 }
 
-fn createProject(allocator: std.mem.Allocator, name: []const u8, app_id: []const u8, port: u16) !void {
+fn parseTemplate(value: []const u8) error{UnknownTemplate}!Template {
+    if (std.mem.eql(u8, value, "counter")) return .counter;
+    if (std.mem.eql(u8, value, "ffi")) return .ffi;
+    return error.UnknownTemplate;
+}
+
+fn createProject(allocator: std.mem.Allocator, name: []const u8, app_id: []const u8, port: u16, template: Template) !void {
     const cwd = std.fs.cwd();
     try cwd.makeDir(name);
     var proj_dir = try cwd.openDir(name, .{ .iterate = true });
     defer proj_dir.close();
 
-    const toml = try std.fmt.allocPrint(allocator,
-        "[app]\nname=\"{s}\"\napp_id=\"{s}\"\nport={d}\n",
-        .{ name, app_id, port },
+    const toml = try std.fmt.allocPrint(
+        allocator,
+        "[app]\nname=\"{s}\"\napp_id=\"{s}\"\nport={d}\ntemplate=\"{s}\"\n",
+        .{ name, app_id, port, templateName(template) },
     );
     defer allocator.free(toml);
     try writeFile(proj_dir, "zmp.toml", toml);
 
-    try proj_dir.makeDir("android");
-    var android_dir = try proj_dir.openDir("android", .{ .iterate = true });
-    defer android_dir.close();
+    const templates_root = try getTemplatesRoot(allocator);
+    defer allocator.free(templates_root);
 
-    try writeAndroidProject(allocator, android_dir, name, app_id, port);
-    try writeNativeServer(allocator, proj_dir, app_id);
+    const project_android_path = try std.fs.path.join(allocator, &.{ name, "android" });
+    defer allocator.free(project_android_path);
+
+    const android_template = try std.fs.path.join(allocator, &.{ templates_root, "android" });
+    defer allocator.free(android_template);
+    try copyTemplateTree(allocator, android_template, project_android_path);
+
+    if (template == .ffi) {
+        const override_path = try std.fs.path.join(allocator, &.{ templates_root, "ffi", "android-overrides" });
+        defer allocator.free(override_path);
+        try copyTemplateTree(allocator, override_path, project_android_path);
+    }
+
+    const port_str = try std.fmt.allocPrint(allocator, "{d}", .{port});
+    defer allocator.free(port_str);
+    const jni_prefix = try packageToJniPrefix(allocator, app_id);
+    defer allocator.free(jni_prefix);
+
+    const replacements = [_]Replacement{
+        .{ .needle = "__APP_NAME__", .value = name },
+        .{ .needle = "__APP_ID__", .value = app_id },
+        .{ .needle = "__DEV_SERVER_PORT__", .value = port_str },
+        .{ .needle = "__JNI_PREFIX__", .value = jni_prefix },
+    };
+
+    try replacePlaceholdersInFile(allocator, project_android_path, "settings.gradle.kts", &replacements);
+    try replacePlaceholdersInFile(allocator, project_android_path, "app/build.gradle.kts", &replacements);
+    try replacePlaceholdersInFile(allocator, project_android_path, "app/src/main/AndroidManifest.xml", &replacements);
+    try replacePlaceholdersInFile(allocator, project_android_path, "app/src/main/res/values/strings.xml", &replacements);
+    try replacePlaceholdersInFile(allocator, project_android_path, "app/src/main/kotlin/com/example/templateapp/MainActivity.kt", &replacements);
+    try replacePlaceholdersInFile(allocator, project_android_path, "app/src/main/kotlin/com/example/templateapp/Native.kt", &replacements);
+
+    try installNativeTemplate(allocator, templates_root, name, template, &replacements);
+
+    try relocateKotlinPackage(allocator, project_android_path, "com.example.templateapp", app_id);
 
     std.log.info("Project created: {s}", .{name});
     std.log.info("Next: cd {s} && zmp dev android --port {d}", .{ name, port });
@@ -176,29 +225,53 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
         try ensureEmulatorRunning(avd_name);
     }
 
+    const template = readTemplateFromConfig(&proj);
+
     // Build JNI libs when requested via --native
     if (use_native) {
-        if (!fileExists(proj, "native/server.zig")) {
-            std.log.warn("--native: missing native/server.zig; scaffolding default server", .{});
-            try writeNativeServer(allocator, proj, app_id);
+        const templates_root = try getTemplatesRoot(allocator);
+        defer allocator.free(templates_root);
+        const jni_prefix = try packageToJniPrefix(allocator, app_id);
+        defer allocator.free(jni_prefix);
+        const native_replacements = [_]Replacement{
+            .{ .needle = "__APP_ID__", .value = app_id },
+            .{ .needle = "__JNI_PREFIX__", .value = jni_prefix },
+        };
+
+        switch (template) {
+            .counter => {
+                if (!fileExists(proj, "native/ffi.zig") or !fileExists(proj, "native/server.zig")) {
+                    std.log.warn("--native: scaffolding counter native sources", .{});
+                    try installNativeTemplate(allocator, templates_root, project_path, template, &native_replacements);
+                }
+            },
+            .ffi => {
+                if (!fileExists(proj, "native/ffi.zig")) {
+                    std.log.warn("--native: scaffolding ffi native sources", .{});
+                    try installNativeTemplate(allocator, templates_root, project_path, template, &native_replacements);
+                }
+            },
         }
         std.log.info("--native: building JNI libs", .{});
         // Ensure jniLibs dirs exist
         try runInDir(project_path, &.{ "bash", "-lc", "mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/x86_64" });
         // Build for arm64 (devices + Apple Silicon Emulator)
-        try runInDir(project_path, &.{ "bash", "-lc",
-            "zig build-lib native/ffi.zig -dynamic -fPIC -OReleaseSafe -target aarch64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/arm64-v8a/libzmpserver.so -Inative" });
+        try runInDir(project_path, &.{ "bash", "-lc", "zig build-lib native/ffi.zig -dynamic -fPIC -OReleaseSafe -target aarch64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/arm64-v8a/libzmpserver.so -Inative" });
         // Build for x86_64 (Intel emulator)
-        _ = runInDir(project_path, &.{ "bash", "-lc",
-            "zig build-lib native/ffi.zig -dynamic -fPIC -OReleaseSafe -target x86_64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/x86_64/libzmpserver.so -Inative" }) catch {};
+        _ = runInDir(project_path, &.{ "bash", "-lc", "zig build-lib native/ffi.zig -dynamic -fPIC -OReleaseSafe -target x86_64-linux-android -Dandroid_api_level=24 -femit-bin=android/app/src/main/jniLibs/x86_64/libzmpserver.so -Inative" }) catch {};
     }
 
+    _ = runCmdSilently(&.{ "adb", "shell", "am", "force-stop", app_id }) catch {};
+    _ = runCmdSilently(&.{ "adb", "reverse", "--remove-all" }) catch {};
+
     var p1: [16]u8 = undefined;
+    const tcp_remove = try std.fmt.bufPrint(&p1, "tcp:{d}", .{port});
+    _ = runCmdSilently(&.{ "adb", "reverse", "--remove", tcp_remove }) catch {};
+
     var p2: [16]u8 = undefined;
     if (!use_native) {
-        const tcp1 = try std.fmt.bufPrint(&p1, "tcp:{d}", .{port});
-        const tcp2 = try std.fmt.bufPrint(&p2, "tcp:{d}", .{port});
-        try runCmd(&.{ "adb", "reverse", tcp1, tcp2 });
+        const tcp_dst = try std.fmt.bufPrint(&p2, "tcp:{d}", .{port});
+        try runCmd(&.{ "adb", "reverse", tcp_remove, tcp_dst });
     }
 
     var has_wrapper = blk: {
@@ -212,6 +285,8 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
         try runInDir(project_path, &.{ "gradle", "-p", "android", "wrapper", "--gradle-version", "8.7" });
         has_wrapper = true;
     }
+
+    try ensureLocalProperties(project_path);
 
     if (has_wrapper) {
         if (use_native) {
@@ -232,6 +307,26 @@ fn devAndroid(allocator: std.mem.Allocator, project_path: []const u8, port: u16,
     try runCmd(&.{ "adb", "shell", "am", "start", "-n", comp });
 
     std.log.info("Launched {s} on device. WebView -> http://127.0.0.1:{d}", .{ app_id, port });
+}
+
+fn ensureLocalProperties(project_path: []const u8) !void {
+    const allocator = std.heap.page_allocator;
+    const sdk_env = std.process.getEnvVarOwned(allocator, "ANDROID_HOME") catch std.process.getEnvVarOwned(allocator, "ANDROID_SDK_ROOT") catch {
+        std.log.warn("ANDROID_HOME/ANDROID_SDK_ROOT not set; relying on Gradle autodetection", .{});
+        return;
+    };
+    defer allocator.free(sdk_env);
+
+    const props_content = try std.fmt.allocPrint(allocator, "sdk.dir={s}\n", .{sdk_env});
+    defer allocator.free(props_content);
+
+    const props_path = try std.fs.path.join(allocator, &.{ project_path, "android", "local.properties" });
+    defer allocator.free(props_path);
+
+    try std.fs.cwd().writeFile(.{
+        .sub_path = props_path,
+        .data = props_content,
+    });
 }
 
 fn countConnectedDevices(allocator: std.mem.Allocator) !usize {
@@ -300,7 +395,8 @@ fn ensureEmulatorRunning(avd_name: []const u8) !void {
 
     std.log.info("starting emulator '{s}'", .{avd_name});
     var cmd_buf: [512]u8 = undefined;
-    const cmd = try std.fmt.bufPrint(&cmd_buf,
+    const cmd = try std.fmt.bufPrint(
+        &cmd_buf,
         "nohup emulator -avd {s} -netdelay none -netspeed full -no-snapshot -no-boot-anim >/dev/null 2>&1 &",
         .{avd_name},
     );
@@ -361,6 +457,186 @@ fn readAppIdFromTomlOrGradle(proj: *std.fs.Dir, buf: []u8) ![]const u8 {
     return error.NotFound;
 }
 
+fn readTemplateFromConfig(proj: *std.fs.Dir) Template {
+    if (proj.openFile("zmp.toml", .{})) |file| {
+        defer file.close();
+        const data = file.readToEndAlloc(std.heap.page_allocator, 64 * 1024) catch return .counter;
+        defer std.heap.page_allocator.free(data);
+        if (std.mem.indexOf(u8, data, "template=\"")) |start| {
+            const off = start + "template=\"".len;
+            if (std.mem.indexOfPos(u8, data, off, "\"")) |end| {
+                const val = data[off..end];
+                return parseTemplate(val) catch .counter;
+            }
+        }
+    } else |_| {}
+    return .counter;
+}
+
+const Replacement = struct {
+    needle: []const u8,
+    value: []const u8,
+};
+
+fn templateName(template: Template) []const u8 {
+    return switch (template) {
+        .counter => "counter",
+        .ffi => "ffi",
+    };
+}
+
+fn getTemplatesRoot(allocator: std.mem.Allocator) ![]u8 {
+    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+    const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
+    return std.fs.path.resolve(allocator, &.{ exe_dir, "..", "..", "templates" });
+}
+
+fn copyTemplateTree(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
+    var src_dir = try std.fs.cwd().openDir(src_path, .{ .iterate = true });
+    defer src_dir.close();
+    try std.fs.cwd().makePath(dst_path);
+
+    var it = src_dir.iterate();
+    while (try it.next()) |entry| {
+        if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+        const child_src = try std.fs.path.join(allocator, &.{ src_path, entry.name });
+        defer allocator.free(child_src);
+        const child_dst = try std.fs.path.join(allocator, &.{ dst_path, entry.name });
+        defer allocator.free(child_dst);
+        switch (entry.kind) {
+            .directory => try copyTemplateTree(allocator, child_src, child_dst),
+            .file => {
+                if (std.fs.path.dirname(child_dst)) |parent| {
+                    try std.fs.cwd().makePath(parent);
+                }
+                try std.fs.cwd().copyFile(child_src, std.fs.cwd(), child_dst, .{});
+            },
+            else => {},
+        }
+    }
+}
+
+fn replacePlaceholdersInFile(
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    relative_path: []const u8,
+    replacements: []const Replacement,
+) !void {
+    const full_path = try std.fs.path.join(allocator, &.{ root_path, relative_path });
+    defer allocator.free(full_path);
+
+    var file = std.fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    var need_close = true;
+    defer if (need_close) file.close();
+
+    const content = file.readToEndAlloc(allocator, 8 * 1024 * 1024) catch |err| switch (err) {
+        error.FileTooBig => return error.FileTooBig,
+        else => return err,
+    };
+    file.close();
+    need_close = false;
+
+    var current = content;
+    var changed = false;
+    for (replacements) |rep| {
+        if (std.mem.indexOf(u8, current, rep.needle) != null) {
+            const next = try std.mem.replaceOwned(u8, allocator, current, rep.needle, rep.value);
+            allocator.free(current);
+            current = next;
+            changed = true;
+        }
+    }
+
+    if (!changed) {
+        allocator.free(current);
+        return;
+    }
+
+    try std.fs.cwd().writeFile(.{ .sub_path = full_path, .data = current });
+    allocator.free(current);
+}
+
+fn packageToJniPrefix(allocator: std.mem.Allocator, app_id: []const u8) ![]u8 {
+    var buf = try allocator.alloc(u8, app_id.len);
+    for (app_id, 0..) |c, i| {
+        buf[i] = if (c == '.') '_' else c;
+    }
+    return buf;
+}
+
+fn packageToPath(allocator: std.mem.Allocator, pkg: []const u8) ![]u8 {
+    var buf = try allocator.alloc(u8, pkg.len);
+    for (pkg, 0..) |c, i| {
+        buf[i] = if (c == '.') '/' else c;
+    }
+    return buf;
+}
+
+fn relocateKotlinPackage(
+    allocator: std.mem.Allocator,
+    android_root: []const u8,
+    old_pkg: []const u8,
+    new_pkg: []const u8,
+) !void {
+    if (std.mem.eql(u8, old_pkg, new_pkg)) return;
+
+    const kotlin_root = try std.fs.path.join(allocator, &.{ android_root, "app/src/main/kotlin" });
+    defer allocator.free(kotlin_root);
+
+    const old_rel = try packageToPath(allocator, old_pkg);
+    defer allocator.free(old_rel);
+    const new_rel = try packageToPath(allocator, new_pkg);
+    defer allocator.free(new_rel);
+
+    const old_full = try std.fs.path.join(allocator, &.{ kotlin_root, old_rel });
+    defer allocator.free(old_full);
+    const new_full = try std.fs.path.join(allocator, &.{ kotlin_root, new_rel });
+    defer allocator.free(new_full);
+
+    if (std.mem.eql(u8, old_full, new_full)) return;
+
+    try std.fs.cwd().makePath(new_full);
+
+    var src_dir = std.fs.cwd().openDir(old_full, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer src_dir.close();
+
+    var it = src_dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        const from = try std.fs.path.join(allocator, &.{ old_full, entry.name });
+        defer allocator.free(from);
+        const to = try std.fs.path.join(allocator, &.{ new_full, entry.name });
+        defer allocator.free(to);
+        try std.fs.cwd().makePath(std.fs.path.dirname(to) orelse new_full);
+        try std.fs.cwd().rename(from, to);
+    }
+
+    std.fs.cwd().deleteTree(old_full) catch {};
+}
+
+fn installNativeTemplate(
+    allocator: std.mem.Allocator,
+    templates_root: []const u8,
+    project_root: []const u8,
+    template: Template,
+    replacements: []const Replacement,
+) !void {
+    const dest_native = try std.fs.path.join(allocator, &.{ project_root, "native" });
+    defer allocator.free(dest_native);
+    const src_native = try std.fs.path.join(allocator, &.{ templates_root, templateName(template), "native" });
+    defer allocator.free(src_native);
+
+    try copyTemplateTree(allocator, src_native, dest_native);
+    try replacePlaceholdersInFile(allocator, dest_native, "ffi.zig", replacements);
+}
+
 fn discoverProjectPath(allocator: std.mem.Allocator, start_dir: []const u8) !?[]u8 {
     const cwd = std.fs.cwd();
     var dir = try cwd.openDir(start_dir, .{ .iterate = true });
@@ -385,7 +661,9 @@ fn discoverProjectPath(allocator: std.mem.Allocator, start_dir: []const u8) !?[]
         if (app_dir_maybe) |*app_dir| {
             defer app_dir.close();
             var has_build = true;
-            app_dir.access("build.gradle.kts", .{}) catch { has_build = false; };
+            app_dir.access("build.gradle.kts", .{}) catch {
+                has_build = false;
+            };
             if (has_build) {
                 if (found != null) return null; // multiple; ambiguous
                 found = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ start_dir, ent.name });
@@ -478,345 +756,4 @@ fn writeFile(dir: std.fs.Dir, path: []const u8, contents: []const u8) !void {
     var file = try dir.createFile(path, .{ .read = true, .truncate = true, .exclusive = false });
     defer file.close();
     try file.writeAll(contents);
-}
-
-fn writeAndroidProject(allocator: std.mem.Allocator, android_dir: std.fs.Dir, name: []const u8, app_id: []const u8, port: u16) !void {
-    // settings.gradle.kts
-    var s_buf = std.array_list.Managed(u8).init(allocator);
-    defer s_buf.deinit();
-    var sw = s_buf.writer();
-    try sw.writeAll(
-        "pluginManagement {\n" ++
-        "  repositories {\n" ++
-        "    gradlePluginPortal()\n" ++
-        "    google()\n" ++
-        "    mavenCentral()\n" ++
-        "  }\n" ++
-        "}\n" ++
-        "dependencyResolutionManagement {\n" ++
-        "  repositories {\n" ++
-        "    google()\n" ++
-        "    mavenCentral()\n" ++
-        "  }\n" ++
-        "}\n" ++
-        "rootProject.name = \"");
-    try sw.print("{s}", .{name});
-    try sw.writeAll("\"\ninclude(\":app\")\n");
-    const settings_txt = try s_buf.toOwnedSlice();
-    defer allocator.free(settings_txt);
-    try writeFile(android_dir, "settings.gradle.kts", settings_txt);
-
-    const root_build =
-        "plugins {\n" ++
-        "  id(\"com.android.application\") version \"8.4.0\" apply false\n" ++
-        "  id(\"org.jetbrains.kotlin.android\") version \"1.9.23\" apply false\n" ++
-        "}\n";
-    try writeFile(android_dir, "build.gradle.kts", root_build);
-
-    const gradle_props =
-        "org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8\n" ++
-        "android.useAndroidX=true\n" ++
-        "kotlin.code.style=official\n";
-    try writeFile(android_dir, "gradle.properties", gradle_props);
-
-    try android_dir.makeDir("app");
-    var app_dir = try android_dir.openDir("app", .{ .iterate = true });
-    defer app_dir.close();
-
-    // app/build.gradle.kts
-    var b_buf = std.array_list.Managed(u8).init(allocator);
-    defer b_buf.deinit();
-    var bw = b_buf.writer();
-    try bw.writeAll(
-        "plugins {\n  id(\"com.android.application\")\n  id(\"org.jetbrains.kotlin.android\")\n}\n\n" ++
-        "val zmpNative = (project.findProperty(\"zmpNative\") as String?)?.toBoolean() ?: false\n" ++
-        "android {\n  namespace = \"");
-    try bw.print("{s}", .{app_id});
-    try bw.writeAll("\"\n  compileSdk = 34\n  defaultConfig {\n    applicationId = \"");
-    try bw.print("{s}", .{app_id});
-    try bw.writeAll("\"\n    minSdk = 24\n    targetSdk = 34\n    versionCode = 1\n    versionName = \"1.0\"\n    buildConfigField(\"int\", \"DEV_SERVER_PORT\", \"");
-    try bw.print("{d}", .{port});
-    try bw.writeAll("\")\n    buildConfigField(\"boolean\", \"DEV_NATIVE\", zmpNative.toString())\n  }\n  buildFeatures {\n    buildConfig = true\n  }\n  buildTypes {\n    getByName(\"release\") { isMinifyEnabled = false }\n  }\n  compileOptions {\n    sourceCompatibility = JavaVersion.VERSION_17\n    targetCompatibility = JavaVersion.VERSION_17\n  }\n  kotlinOptions { jvmTarget = \"17\" }\n}\n\n");
-    try bw.writeAll(
-        "dependencies {\n  implementation(\"androidx.appcompat:appcompat:1.7.0\")\n  implementation(\"androidx.webkit:webkit:1.11.0\")\n  implementation(\"androidx.activity:activity-ktx:1.9.2\")\n}\n");
-    const app_build = try b_buf.toOwnedSlice();
-    defer allocator.free(app_build);
-    try writeFile(app_dir, "build.gradle.kts", app_build);
-
-    try app_dir.makeDir("src");
-    var src_dir = try app_dir.openDir("src", .{ .iterate = true });
-    defer src_dir.close();
-    try src_dir.makeDir("main");
-    var main_dir = try app_dir.openDir("src/main", .{ .iterate = true });
-    defer main_dir.close();
-
-    // AndroidManifest.xml
-    var m_buf = std.array_list.Managed(u8).init(allocator);
-    defer m_buf.deinit();
-    var mw = m_buf.writer();
-    try mw.writeAll(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n  <uses-permission android:name=\"android.permission.INTERNET\"/>\n  <application android:label=\"@string/app_name\" android:icon=\"@android:drawable/ic_menu_view\" android:theme=\"@style/AppTheme\" android:networkSecurityConfig=\"@xml/network_security_config\">\n    <activity android:name=\"");
-    try mw.print("{s}", .{app_id});
-    try mw.writeAll(".MainActivity\" android:exported=\"true\" android:configChanges=\"orientation|screenLayout|screenSize|keyboardHidden\">\n      <intent-filter>\n        <action android:name=\"android.intent.action.MAIN\"/>\n        <category android:name=\"android.intent.category.LAUNCHER\"/>\n      </intent-filter>\n    </activity>\n  </application>\n</manifest>\n");
-    const manifest = try m_buf.toOwnedSlice();
-    defer allocator.free(manifest);
-    try writeFile(main_dir, "AndroidManifest.xml", manifest);
-
-    try main_dir.makeDir("res");
-    var res_dir = try app_dir.openDir("src/main/res", .{ .iterate = true });
-    defer res_dir.close();
-    try res_dir.makeDir("values");
-    var values_dir = try app_dir.openDir("src/main/res/values", .{ .iterate = true });
-    defer values_dir.close();
-    const strings_xml = try std.fmt.allocPrint(allocator, "<resources>\n  <string name=\"app_name\">{s}</string>\n</resources>\n", .{ name });
-    defer allocator.free(strings_xml);
-    try writeFile(values_dir, "strings.xml", strings_xml);
-    const styles_xml = "<resources>\n  <style name=\"AppTheme\" parent=\"Theme.AppCompat.Light.NoActionBar\"/>\n</resources>\n";
-    try writeFile(values_dir, "styles.xml", styles_xml);
-
-    try res_dir.makeDir("xml");
-    var xml_dir = try app_dir.openDir("src/main/res/xml", .{ .iterate = true });
-    defer xml_dir.close();
-    const netsec = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<network-security-config>\n  <domain-config cleartextTrafficPermitted=\"true\">\n    <domain includeSubdomains=\"true\">127.0.0.1</domain>\n  </domain-config>\n</network-security-config>\n";
-    try writeFile(xml_dir, "network_security_config.xml", netsec);
-
-    try main_dir.makeDir("kotlin");
-    var kotlin_dir = try app_dir.openDir("src/main/kotlin", .{ .iterate = true });
-    defer kotlin_dir.close();
-
-    try makeKotlinPkgDirs(allocator, app_dir, "src/main/kotlin", app_id);
-    const pkg_path = try joinKotlinPkgPath(allocator, "src/main/kotlin", app_id);
-    defer allocator.free(pkg_path);
-    var pkg_dir = try app_dir.openDir(pkg_path, .{ .iterate = true });
-    defer pkg_dir.close();
-
-    var k_buf = std.array_list.Managed(u8).init(allocator);
-    defer k_buf.deinit();
-    var kw = k_buf.writer();
-    try kw.writeAll("package ");
-    try kw.print("{s}", .{app_id});
-    try kw.writeAll(
-        "\n\nimport android.os.Bundle\n"
-        ++ "import android.view.Gravity\n"
-        ++ "import android.webkit.WebView\n"
-        ++ "import android.webkit.WebViewClient\n"
-        ++ "import android.widget.TextView\n"
-        ++ "import androidx.appcompat.app.AppCompatActivity\n\n"
-        ++ "class MainActivity : AppCompatActivity() {\n"
-        ++ "  override fun onCreate(savedInstanceState: Bundle?) {\n"
-        ++ "    super.onCreate(savedInstanceState)\n"
-        ++ "    val number = Native.getNumber()\n"
-        ++ "    val textView = TextView(this).apply {\n"
-        ++ "      text = \"Zig says: \" + number\n"
-        ++ "      textSize = 24f\n"
-        ++ "      gravity = Gravity.CENTER\n"
-        ++ "      setPadding(32, 32, 32, 32)\n"
-        ++ "    }\n"
-        ++ "    setContentView(textView)\n"
-        ++ "    // launchWebView(BuildConfig.DEV_SERVER_PORT)\n"
-        ++ "  }\n\n"
-        ++ "  @Suppress(\"unused\")\n"
-        ++ "  private fun launchWebView(port: Int) {\n"
-        ++ "    if (BuildConfig.DEBUG) {\n"
-        ++ "      WebView.setWebContentsDebuggingEnabled(true)\n"
-        ++ "    }\n"
-        ++ "    val webView = WebView(this)\n"
-        ++ "    val settings = webView.settings\n"
-        ++ "    settings.javaScriptEnabled = true\n"
-        ++ "    settings.domStorageEnabled = true\n"
-        ++ "    webView.webViewClient = WebViewClient()\n"
-        ++ "    setContentView(webView)\n"
-        ++ "    webView.loadUrl(\"http://127.0.0.1:\" + port + \"/\")\n"
-        ++ "  }\n"
-        ++ "}\n"
-    );
-    const main_kt = try k_buf.toOwnedSlice();
-    defer allocator.free(main_kt);
-    try writeFile(pkg_dir, "MainActivity.kt", main_kt);
-
-    // Write Native.kt shim
-    var n_buf = std.array_list.Managed(u8).init(allocator);
-    defer n_buf.deinit();
-    var nw = n_buf.writer();
-    try nw.writeAll("package ");
-    try nw.print("{s}", .{app_id});
-    try nw.writeAll(
-        "\n\nobject Native {\n"
-        ++ "  init { System.loadLibrary(\"zmpserver\") }\n"
-        ++ "  @JvmStatic external fun getNumber(): Int\n"
-        ++ "  @JvmStatic external fun startServer(port: Int)\n"
-        ++ "}\n"
-    );
-    const native_kt = try n_buf.toOwnedSlice();
-    defer allocator.free(native_kt);
-    try writeFile(pkg_dir, "Native.kt", native_kt);
-}
-
-fn makeKotlinPkgDirs(allocator: std.mem.Allocator, base_dir: std.fs.Dir, base: []const u8, pkg: []const u8) !void {
-    var parts = std.mem.splitScalar(u8, pkg, '.');
-    var buf = std.array_list.Managed(u8).init(allocator);
-    defer buf.deinit();
-    try buf.appendSlice(base);
-    while (parts.next()) |seg| {
-        try buf.append('/');
-        try buf.appendSlice(seg);
-        const p = buf.items;
-        _ = base_dir.makeDir(p) catch {};
-    }
-}
-
-fn joinKotlinPkgPath(allocator: std.mem.Allocator, base: []const u8, pkg: []const u8) ![]u8 {
-    var parts = std.mem.splitScalar(u8, pkg, '.');
-    var buf = std.array_list.Managed(u8).init(allocator);
-    defer buf.deinit();
-    try buf.appendSlice(base);
-    while (parts.next()) |seg| {
-        try buf.append('/');
-        try buf.appendSlice(seg);
-    }
-    return try buf.toOwnedSlice();
-}
-
-fn writeNativeServer(allocator: std.mem.Allocator, proj_dir: std.fs.Dir, app_id: []const u8) !void {
-    _ = proj_dir.makeDir("native") catch {};
-    var native_dir = try proj_dir.openDir("native", .{ .iterate = true });
-    defer native_dir.close();
-
-    var underscored = std.array_list.Managed(u8).init(allocator);
-    defer underscored.deinit();
-    for (app_id) |c| try underscored.append(if (c == '.') '_' else c);
-    const jni_sym = try std.fmt.allocPrint(allocator, "Java_{s}_Native_startServer", .{underscored.items});
-    defer allocator.free(jni_sym);
-
-    try writeNativeHelpers(allocator, native_dir);
-    try writeNativeFfi(allocator, native_dir, underscored.items);
-
-    var sbuf = std.array_list.Managed(u8).init(allocator);
-    defer sbuf.deinit();
-    var w = sbuf.writer();
-    try w.writeAll("const std = @import(\"std\");\n\n");
-    try w.writeAll("const Auxv = struct {\n" ++
-        "    const Entry = extern struct { tag: usize, value: usize };\n" ++
-        "    fn read(tag: usize) usize {\n" ++
-        "        var file = std.fs.openFileAbsolute(\"/proc/self/auxv\", .{}) catch return 0;\n" ++
-        "        defer file.close();\n" ++
-        "        var read_buf: [1024]u8 = undefined;\n" ++
-        "        var reader = file.reader(&read_buf);\n" ++
-        "        var entry: Entry = .{ .tag = 0, .value = 0 };\n" ++
-        "        while (true) {\n" ++
-        "            const bytes_read = reader.read(std.mem.asBytes(&entry)) catch return 0;\n" ++
-        "            if (bytes_read != @sizeOf(Entry)) return 0;\n" ++
-        "            if (entry.tag == tag) return entry.value;\n" ++
-        "            if (entry.tag == 0 and entry.value == 0) return 0;\n" ++
-        "        }\n" ++
-        "    }\n" ++
-        "};\n\n");
-    try w.writeAll("pub export fn getauxval(tag: usize) callconv(.c) usize {\n" ++
-        "    return Auxv.read(tag);\n" ++
-        "}\n\n");
-    try w.writeAll("var started = std.atomic.Value(u8).init(0);\n");
-    try w.writeAll("var counter = std.atomic.Value(u64).init(0);\n\n");
-    try w.writeAll("fn serverMain(port: u16) !void {\n");
-    try w.writeAll("    const addr = try std.net.Address.parseIp4(\"127.0.0.1\", port);\n");
-    try w.writeAll("    var server = try std.net.Address.listen(addr, .{});\n");
-    try w.writeAll("    defer server.deinit();\n");
-    try w.writeAll("    while (true) {\n");
-    try w.writeAll("        const conn = try server.accept();\n");
-    try w.writeAll("        const t = try std.Thread.spawn(.{}, handleConn, .{conn});\n");
-    try w.writeAll("        t.detach();\n");
-    try w.writeAll("    }\n");
-    try w.writeAll("}\n\n");
-    try w.writeAll("fn handleConn(conn: std.net.Server.Connection) !void {\n");
-    try w.writeAll("    defer conn.stream.close();\n");
-    try w.writeAll("    var buf: [4096]u8 = undefined;\n");
-    try w.writeAll("    const n = conn.stream.read(&buf) catch return;\n");
-    try w.writeAll("    if (n == 0) return;\n");
-    try w.writeAll("    const req = buf[0..n];\n");
-    try w.writeAll("    var path: []const u8 = \"/\";\n");
-    try w.writeAll("    if (std.mem.indexOf(u8, req, \" \")) |sp1| {\n");
-    try w.writeAll("        const off = sp1 + 1;\n");
-    try w.writeAll("        if (std.mem.indexOfPos(u8, req, off, \" \")) |sp2| {\n");
-    try w.writeAll("            path = req[off..sp2];\n");
-    try w.writeAll("        }\n");
-    try w.writeAll("    }\n");
-    try w.writeAll("    if (std.mem.eql(u8, path, \"/inc\")) {\n");
-    try w.writeAll("        _ = counter.fetchAdd(1, .monotonic);\n");
-    try w.writeAll("        try writeHtml(conn);\n");
-    try w.writeAll("    } else {\n");
-    try w.writeAll("        try writeHtml(conn);\n");
-    try w.writeAll("    }\n");
-    try w.writeAll("}\n\n");
-    try w.writeAll("fn writeHtml(conn: std.net.Server.Connection) !void {\n");
-    try w.writeAll("    const val = counter.load(.monotonic);\n");
-    try w.writeAll("    const body = std.fmt.allocPrint(std.heap.page_allocator, \"<!doctype html>\\n<html><head><meta charset=\\\"utf-8\\\"><title>ZMP Counter</title></head>\\n<body>\\n<h1>ZMP Counter</h1>\\n<p>Count: {d}</p>\\n<p><a href=\\\"/inc\\\">Increment</a></p>\\n</body></html>\", .{val}) catch return;\n");
-    try w.writeAll("    defer std.heap.page_allocator.free(body);\n");
-    try w.writeAll("    const resp = std.fmt.allocPrint(std.heap.page_allocator, \"HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: {d}\\r\\nConnection: close\\r\\n\\r\\n{s}\", .{ body.len, body }) catch return;\n");
-    try w.writeAll("    defer std.heap.page_allocator.free(resp);\n");
-    try w.writeAll("    _ = conn.stream.writeAll(resp) catch return;\n");
-    try w.writeAll("}\n\n");
-    try w.writeAll("export fn ");
-    try w.writeAll(jni_sym);
-    try w.writeAll("(env: ?*anyopaque, clazz: ?*anyopaque, port: c_int) callconv(.c) void {\n");
-    try w.writeAll("    _ = env; _ = clazz;\n");
-    try w.writeAll("    const prev = started.swap(1, .seq_cst);\n");
-    try w.writeAll("    if (prev == 1) return; // already started\n");
-    try w.writeAll("    const t = std.Thread.spawn(.{}, start, .{@as(u16, @intCast(port))}) catch return;\n");
-    try w.writeAll("    t.detach();\n");
-    try w.writeAll("}\n\n");
-    try w.writeAll("fn start(port: u16) void {\n");
-    try w.writeAll("    serverMain(port) catch {};\n");
-    try w.writeAll("}\n");
-
-    const server_zig = try sbuf.toOwnedSlice();
-    defer allocator.free(server_zig);
-    try writeFile(native_dir, "server.zig", server_zig);
-}
-
-fn writeNativeHelpers(allocator: std.mem.Allocator, native_dir: std.fs.Dir) !void {
-    _ = allocator;
-    const header = "// reserved for future JNI helpers\n";
-    try writeFile(native_dir, "zmp_jni_helper.h", header);
-}
-
-fn writeNativeFfi(allocator: std.mem.Allocator, native_dir: std.fs.Dir, underscored: []const u8) !void {
-    const number_sym = try std.fmt.allocPrint(allocator, "Java_{s}_Native_getNumber", .{underscored});
-    defer allocator.free(number_sym);
-    const stub_sym = try std.fmt.allocPrint(allocator, "Java_{s}_Native_startServer", .{underscored});
-    defer allocator.free(stub_sym);
-
-    var buf = std.array_list.Managed(u8).init(allocator);
-    defer buf.deinit();
-    var fw = buf.writer();
-    try fw.writeAll(
-        "const std = @import(\"std\");\n\n"
-        ++ "pub export fn getauxval(tag: usize) callconv(.c) usize {\n"
-        ++ "    _ = tag;\n"
-        ++ "    return 0;\n"
-        ++ "}\n\n"
-    );
-    const fn_header_number = try std.fmt.allocPrint(allocator,
-        "pub export fn {s}(env: ?*anyopaque, clazz: ?*anyopaque) callconv(.c) i32 {{\n",
-        .{number_sym},
-    );
-    defer allocator.free(fn_header_number);
-    try fw.writeAll(fn_header_number);
-    try fw.writeAll(
-        "    _ = env; _ = clazz;\n"
-        ++ "    return 42;\n"
-        ++ "}\n\n"
-    );
-    const fn_header_stub = try std.fmt.allocPrint(allocator,
-        "pub export fn {s}(env: ?*anyopaque, clazz: ?*anyopaque, port: i32) callconv(.c) void {{\n",
-        .{stub_sym},
-    );
-    defer allocator.free(fn_header_stub);
-    try fw.writeAll(fn_header_stub);
-    try fw.writeAll(
-        "    _ = env; _ = clazz; _ = port;\n"
-        ++ "}\n"
-    );
-
-    const ffi_content = try buf.toOwnedSlice();
-    defer allocator.free(ffi_content);
-    try writeFile(native_dir, "ffi.zig", ffi_content);
 }
